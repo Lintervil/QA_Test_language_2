@@ -164,7 +164,7 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
         """,
     )
     site_terms = page.eval_on_selector_all(
-        "[class*='logo'], [id*='logo'], [class*='brand'], [id*='brand'], [data-brand], meta[property='og:site_name']",
+        "[class*='logo'], [id*='logo'], [data-brand], [itemprop='brand'], meta[property='og:site_name']",
         """
         elements => elements.map(element => (
           element.innerText || element.getAttribute('alt') ||
@@ -172,8 +172,13 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
         ).trim()).filter(Boolean).slice(0, 50)
         """,
     )
+    model_selector = (
+        "h1, [itemprop='name'], [class*='model'], [id*='model'], [class*='sku'], [class*='product-name']"
+        if _looks_like_product_url(url)
+        else "[itemprop='name'], [class*='model'], [id*='model'], [class*='sku'], [class*='product-name']"
+    )
     model_terms = page.eval_on_selector_all(
-        "h1, [itemprop='name'], [class*='model'], [id*='model'], [class*='sku'], [class*='product-name']",
+        model_selector,
         """
         elements => elements.map(element => (
           element.innerText || element.getAttribute('content') || ''
