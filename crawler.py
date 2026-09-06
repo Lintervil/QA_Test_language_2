@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 from collections import deque
-from urllib.parse import urldefrag, urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urldefrag, urljoin, urlparse, urlsplit, urlunsplit
 
 try:
     from playwright.sync_api import Error as PlaywrightError
@@ -36,6 +36,13 @@ def normalize_url(value: str) -> str:
     if not re.match(r"^https?://", value, re.IGNORECASE):
         value = "https://" + value
     value, _ = urldefrag(value)
+    parsed = urlsplit(value)
+    query = [
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.casefold().startswith(("utm_", "fbclid", "gclid", "yclid"))
+    ]
+    value = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
     return value.rstrip("/") or value
 
 
@@ -56,6 +63,8 @@ def _internal_links(page, base_url: str) -> list[str]:
         url = normalize_url(urljoin(base_url, str(raw_url)))
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not _same_domain(url, base_url):
+            continue
+        if re.search(r"\.(?:pdf|jpg|jpeg|png|gif|svg|webp|mp4|mp3|zip|rar)(?:$|\?)", parsed.path, re.IGNORECASE):
             continue
         if url in seen:
             continue
@@ -127,6 +136,23 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
         }).filter(Boolean).join(String.fromCharCode(10))
         """,
     )
+    site_terms = page.eval_on_selector_all(
+        "[class*='logo'], [id*='logo'], [class*='brand'], [id*='brand'], [data-brand], meta[property='og:site_name']",
+        """
+        elements => elements.map(element => (
+          element.innerText || element.getAttribute('alt') ||
+          element.getAttribute('aria-label') || element.getAttribute('content') || ''
+        ).trim()).filter(Boolean).slice(0, 50)
+        """,
+    )
+    model_terms = page.eval_on_selector_all(
+        "h1, [itemprop='name'], [class*='model'], [id*='model'], [class*='sku'], [class*='product-name']",
+        """
+        elements => elements.map(element => (
+          element.innerText || element.getAttribute('content') || ''
+        ).trim()).filter(Boolean).slice(0, 100)
+        """,
+    )
     title = page.title()
     description = page.locator("meta[name='description']").get_attribute("content") or ""
     page_height = page.evaluate("Math.max(document.documentElement.scrollHeight, window.innerHeight)")
@@ -147,6 +173,8 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
         "description": description,
         "text": text,
         "attributes": attributes,
+        "site_terms": site_terms or [],
+        "model_terms": model_terms or [],
         "screenshot": screenshot,
         "issues": [],
         "error": "",
@@ -176,8 +204,8 @@ def _install_browser_if_needed() -> None:
 
 def crawl_site(
     start_url: str,
-    max_depth: int = 0,
-    max_pages: int = 20,
+    max_depth: int | None = 0,
+    max_pages: int | None = 20,
     expand_dynamic: bool = True,
     progress=None,
     status=None,
@@ -189,8 +217,10 @@ def crawl_site(
     if urlparse(start_url).scheme not in {"http", "https"}:
         raise ValueError("Ссылка должна начинаться с http:// или https://")
 
-    max_depth = max(0, min(int(max_depth), 3))
-    max_pages = max(1, min(int(max_pages), 20))
+    if max_depth is not None:
+        max_depth = max(0, min(int(max_depth), 3))
+    if max_pages is not None:
+        max_pages = max(1, min(int(max_pages), 20))
     queue = deque([(start_url, 0)])
     queued = {start_url}
     results: list[dict] = []
@@ -211,11 +241,12 @@ def crawl_site(
         page.set_default_timeout(5_000)
         page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
         try:
-            while queue and len(results) < max_pages:
+            while queue and (max_pages is None or len(results) < max_pages):
                 url, depth = queue.popleft()
                 if status:
-                    status(f"Проверяется страница {len(results) + 1} из {max_pages}: {url}")
-                if progress:
+                    total_label = "без лимита" if max_pages is None else str(max_pages)
+                    status(f"Проверяется страница {len(results) + 1} из {total_label}: {url}")
+                if progress and max_pages is not None:
                     progress(len(results) / max_pages)
                 try:
                     result = _collect_page(page, url, depth, expand_dynamic)
@@ -227,6 +258,8 @@ def crawl_site(
                         "description": "",
                         "text": "",
                         "attributes": "",
+                        "site_terms": [],
+                        "model_terms": [],
                         "screenshot": None,
                         "issues": [],
                         "error": str(error),
@@ -235,11 +268,15 @@ def crawl_site(
                 results.append(result)
                 for link in result.get("links", []):
                     next_depth = depth + 1
-                    if next_depth > max_depth or link in queued or len(queued) >= max_pages:
+                    if (
+                        (max_depth is not None and next_depth > max_depth)
+                        or link in queued
+                        or (max_pages is not None and len(queued) >= max_pages)
+                    ):
                         continue
                     queued.add(link)
                     queue.append((link, next_depth))
-                if progress:
+                if progress and max_pages is not None:
                     progress(len(results) / max_pages)
         finally:
             context.close()
