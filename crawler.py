@@ -124,7 +124,7 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
             .filter(name => element.hasAttribute(name))
             .map(name => `${name}: ${element.getAttribute(name)}`);
           return values.join(' | ');
-        }).filter(Boolean).join('\n')
+        }).filter(Boolean).join(String.fromCharCode(10))
         """,
     )
     title = page.title()
