@@ -128,6 +128,7 @@ def _show_page(page_number: int, page: dict) -> None:
                     "</div></div>",
                     unsafe_allow_html=True,
                 )
+                st.caption("Задача для контент-менеджера · кнопка копирования встроена в блок")
                 st.code(
                     f"Страница: {page['url']}\n- {issue['word']} — «{issue['context']}»",
                     language=None,
@@ -152,9 +153,9 @@ with st.sidebar:
         help="Проверяются только ссылки на том же домене.",
     )
     scan_entire_site = st.checkbox(
-        "Проверять весь сайт без лимита",
+        "Глубокий обход: главная → навигация → каталог",
         value=True,
-        help="По умолчанию обходит все найденные внутренние ссылки. Большие сайты могут проверяться долго.",
+        help="Проверяет главную, видимые ссылки из шапки/навигации/футера, разделы каталога и несколько карточек товаров в каждом разделе.",
     )
     depth = st.number_input(
         "Глубина обхода",
@@ -168,11 +169,15 @@ with st.sidebar:
     max_pages = st.number_input(
         "Лимит страниц",
         min_value=1,
-        max_value=20,
-        value=20,
-        step=1,
-        disabled=scan_entire_site,
-        help="В режиме «весь сайт» это поле отключается.",
+        max_value=500,
+        value=100,
+        step=10,
+        help="Защитный предел по умолчанию — 100 страниц, чтобы сайт не ушёл в бесконечный обход.",
+    )
+    unlimited_pages = st.checkbox(
+        "Снять защитный лимит страниц",
+        value=False,
+        help="Отключает предел полностью. Используйте только если уверены, что на сайте нет бесконечных фильтров и календарей.",
     )
     product_sample = st.number_input(
         "Карточек товара на раздел",
@@ -221,9 +226,10 @@ if run:
             pages = crawl_site(
                 normalized,
                 max_depth=None if scan_entire_site else int(depth),
-                max_pages=None if scan_entire_site else int(max_pages),
+                max_pages=None if unlimited_pages else int(max_pages),
                 product_sample=int(product_sample),
                 expand_dynamic=expand_dynamic,
+                smart_mode=True,
                 progress=progress.progress,
                 status=status.info,
             )
@@ -237,8 +243,12 @@ if run:
                 page["issues"] = check_page(page, custom_exceptions, automatic_whitelist)
             st.session_state["automatic_whitelist_count"] = len(automatic_whitelist)
             st.session_state["pages"] = pages
+            st.session_state["crawl_limit_reached"] = bool(pages and pages[0].get("_limit_reached"))
             progress.progress(1.0)
-            status.success(f"Проверка завершена: {len(pages)} страниц")
+            if st.session_state["crawl_limit_reached"]:
+                status.warning(f"Проверка остановлена на защитном лимите: {len(pages)} страниц")
+            else:
+                status.success(f"Проверка завершена: {len(pages)} страниц")
         except Exception as error:
             st.error(f"Не удалось запустить проверку: {error}")
 
