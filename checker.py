@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from typing import Iterable
+from urllib.parse import urlparse
 
 from exceptions import BASE_EXCEPTIONS
 
@@ -18,6 +19,10 @@ ENGLISH_RUN_RE = re.compile(
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[._/+&'-][A-Za-z0-9]+)*")
 URL_RE = re.compile(r"(?:https?://|www\.)\S+|\S+@[\w.-]+\.[A-Za-z]{2,}")
 DOMAIN_SUFFIXES = {"com", "ru", "net", "org", "info", "рф"}
+GENERIC_SITE_TERMS = {
+    "www", "shop", "store", "online", "official", "site", "home", "main",
+    "catalog", "ru", "com", "net", "org", "info",
+}
 
 
 def parse_exceptions(value: str | Iterable[str] | None) -> set[str]:
@@ -29,6 +34,36 @@ def parse_exceptions(value: str | Iterable[str] | None) -> set[str]:
     else:
         values = value
     return {str(item).strip().casefold() for item in values if str(item).strip()}
+
+
+def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
+    """Build a conservative whitelist for a site's brand and product/model names."""
+    values: list[str] = []
+    host = urlparse(start_url).hostname or ""
+    values.extend(re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", host))
+    for page in pages:
+        values.extend(page.get("site_terms", []))
+        values.extend(page.get("model_terms", []))
+
+    result: set[str] = set()
+    for value in values:
+        for match in ENGLISH_RUN_RE.finditer(str(value)):
+            phrase = match.group(0).strip(" .,:;!?\"'«»()[]{}")
+            if not phrase:
+                continue
+            tokens = TOKEN_RE.findall(phrase)
+            if not tokens:
+                continue
+            if phrase.casefold() not in GENERIC_SITE_TERMS:
+                result.add(phrase.casefold())
+            # Keep standalone brand/model tokens useful inside mixed phrases,
+            # but do not whitelist short generic UI words automatically.
+            for token in tokens:
+                if token.casefold() in GENERIC_SITE_TERMS or len(token) < 3:
+                    continue
+                if any(char.isdigit() for char in token) or token[:1].isupper() or token.isupper():
+                    result.add(token.casefold())
+    return result
 
 
 def _is_inside_translation_parentheses(text: str, start: int, end: int) -> bool:
@@ -119,19 +154,24 @@ def find_english_issues(
     return issues
 
 
-def check_page(page: dict, custom_exceptions: str | Iterable[str] | None = None) -> list[dict[str, str]]:
+def check_page(
+    page: dict,
+    custom_exceptions: str | Iterable[str] | None = None,
+    automatic_whitelist: str | Iterable[str] | None = None,
+) -> list[dict[str, str]]:
     """Analyze visible text, attributes, title and description from one crawl result."""
+    exceptions = parse_exceptions(custom_exceptions) | parse_exceptions(automatic_whitelist)
     issues: list[dict[str, str]] = []
-    issues.extend(find_english_issues(page.get("text", ""), "Видимый текст", custom_exceptions))
+    issues.extend(find_english_issues(page.get("text", ""), "Видимый текст", exceptions))
     attributes = re.sub(
         r"(?:^|\n)(?:alt|title|placeholder|aria-label):\s*",
         "\n",
         page.get("attributes", ""),
         flags=re.IGNORECASE,
     )
-    issues.extend(find_english_issues(attributes, "Атрибуты интерфейса", custom_exceptions))
-    issues.extend(find_english_issues(page.get("title", ""), "HTML title", custom_exceptions))
-    issues.extend(find_english_issues(page.get("description", ""), "Meta description", custom_exceptions))
+    issues.extend(find_english_issues(attributes, "Атрибуты интерфейса", exceptions))
+    issues.extend(find_english_issues(page.get("title", ""), "HTML title", exceptions))
+    issues.extend(find_english_issues(page.get("description", ""), "Meta description", exceptions))
 
     unique: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
