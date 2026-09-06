@@ -59,10 +59,30 @@ def _looks_like_product_url(url: str) -> bool:
     )
 
 
-def _internal_links(page, base_url: str) -> list[str]:
+def _looks_like_catalog_url(url: str) -> bool:
+    if _looks_like_product_url(url):
+        return False
+    path = (urlparse(url).path or "").casefold()
+    return any(marker in path.split("/") for marker in ("catalog", "catalogue", "category", "categories", "shop"))
+
+
+NAV_LINK_SELECTOR = (
+    "header a[href], nav a[href], footer a[href], [role='navigation'] a[href], "
+    "[class*='header'] a[href], [class*='footer'] a[href]"
+)
+
+
+def _internal_links(page, base_url: str, selector: str = "a[href]") -> list[str]:
     links = page.eval_on_selector_all(
-        "a[href]",
-        "elements => elements.map(element => element.href)",
+        selector,
+        """
+        elements => elements.filter(element => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' &&
+            rect.width > 0 && rect.height > 0;
+        }).map(element => element.href)
+        """,
     )
     result: list[str] = []
     seen: set[str] = set()
@@ -174,6 +194,7 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
         "issues": [],
         "error": "",
         "links": _internal_links(page, url),
+        "nav_links": _internal_links(page, url, NAV_LINK_SELECTOR),
     }
 
 
@@ -203,6 +224,7 @@ def crawl_site(
     max_pages: int | None = 20,
     product_sample: int = 3,
     expand_dynamic: bool = True,
+    smart_mode: bool = True,
     progress=None,
     status=None,
 ) -> list[dict]:
@@ -216,11 +238,18 @@ def crawl_site(
     if max_depth is not None:
         max_depth = max(0, min(int(max_depth), 3))
     if max_pages is not None:
-        max_pages = max(1, min(int(max_pages), 20))
+        max_pages = max(1, min(int(max_pages), 500))
     product_sample = max(1, min(int(product_sample), 10))
-    queue = deque([(start_url, 0)])
+    if _looks_like_product_url(start_url):
+        start_kind = "product"
+    else:
+        start_kind = "catalog" if _looks_like_catalog_url(start_url) else "home"
+    if not smart_mode:
+        start_kind = "generic"
+    queue = deque([(start_url, 0, start_kind)])
     queued = {start_url}
     results: list[dict] = []
+    limit_reached = False
 
     _install_browser_if_needed()
     with sync_playwright() as playwright:
@@ -237,9 +266,20 @@ def crawl_site(
         page = context.new_page()
         page.set_default_timeout(5_000)
         page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+
+        def enqueue(link: str, depth: int, kind: str) -> None:
+            nonlocal limit_reached
+            if (max_depth is not None and depth > max_depth) or link in queued:
+                return
+            if max_pages is not None and len(queued) >= max_pages:
+                limit_reached = True
+                return
+            queued.add(link)
+            queue.append((link, depth, kind))
+
         try:
             while queue and (max_pages is None or len(results) < max_pages):
-                url, depth = queue.popleft()
+                url, depth, kind = queue.popleft()
                 if status:
                     total_label = "без лимита" if max_pages is None else str(max_pages)
                     status(f"Проверяется страница {len(results) + 1} из {total_label}: {url}")
@@ -260,32 +300,60 @@ def crawl_site(
                         "issues": [],
                         "error": str(error),
                         "links": [],
+                        "nav_links": [],
                     }
                 results.append(result)
-                product_links_seen = 0
-                current_is_product = _looks_like_product_url(url)
-                for link in result.get("links", []):
-                    link_is_product = _looks_like_product_url(link)
-                    if link_is_product and current_is_product:
-                        continue
-                    if link_is_product:
-                        if product_links_seen >= product_sample:
-                            continue
-                        product_links_seen += 1
+                if smart_mode:
                     next_depth = depth + 1
-                    if (
-                        (max_depth is not None and next_depth > max_depth)
-                        or link in queued
-                        or (max_pages is not None and len(queued) >= max_pages)
-                    ):
-                        continue
-                    queued.add(link)
-                    queue.append((link, next_depth))
+                    if kind == "home":
+                        # From the homepage follow only links a visitor can reach
+                        # in the header/navigation/footer, plus visible catalog links.
+                        for link in result.get("nav_links", []):
+                            if _looks_like_catalog_url(link):
+                                enqueue(link, next_depth, "catalog")
+                            elif not _looks_like_product_url(link):
+                                enqueue(link, next_depth, "nav")
+                        for link in result.get("links", []):
+                            if _looks_like_catalog_url(link):
+                                enqueue(link, next_depth, "catalog")
+                    elif kind == "nav":
+                        # A header/footer page can lead to another catalog section,
+                        # but its body links are not recursively crawled.
+                        for link in result.get("nav_links", []):
+                            if _looks_like_catalog_url(link):
+                                enqueue(link, next_depth, "catalog")
+                    elif kind == "catalog":
+                        product_links_seen = 0
+                        for link in result.get("links", []):
+                            if _looks_like_catalog_url(link):
+                                enqueue(link, next_depth, "catalog")
+                            elif _looks_like_product_url(link):
+                                if product_links_seen >= product_sample:
+                                    continue
+                                product_links_seen += 1
+                                enqueue(link, next_depth, "product")
+                else:
+                    product_links_seen = 0
+                    current_is_product = _looks_like_product_url(url)
+                    for link in result.get("links", []):
+                        link_is_product = _looks_like_product_url(link)
+                        if link_is_product and current_is_product:
+                            continue
+                        if link_is_product:
+                            if product_links_seen >= product_sample:
+                                continue
+                            product_links_seen += 1
+                        enqueue(link, depth + 1, "generic")
                 if progress and max_pages is not None:
                     progress(len(results) / max_pages)
         finally:
             context.close()
             browser.close()
+    if results:
+        results[0]["_limit_reached"] = limit_reached
     if status:
-        status(f"Проверка завершена: {len(results)} страниц")
+        if limit_reached or (max_pages is not None and len(results) >= max_pages and queue):
+            status(f"Проверка остановлена на лимите: {len(results)} страниц")
+        else:
+            status(f"Проверка завершена: {len(results)} страниц")
     return results
