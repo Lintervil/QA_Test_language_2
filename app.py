@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from checker import check_page, top_words
+from checker import automatic_exceptions, check_page, top_words
 from crawler import crawl_site, normalize_url
 
 
@@ -156,12 +156,18 @@ with st.sidebar:
         placeholder="https://example.ru/",
         help="Проверяются только ссылки на том же домене.",
     )
+    scan_entire_site = st.checkbox(
+        "Проверять весь сайт без лимита",
+        value=False,
+        help="Обходит все найденные внутренние ссылки без ограничения страниц и глубины. Большие сайты могут проверяться долго.",
+    )
     depth = st.number_input(
         "Глубина обхода",
         min_value=0,
         max_value=3,
         value=0,
         step=1,
+        disabled=scan_entire_site,
         help="0 — только указанная страница, 1 — ещё один переход по внутренним ссылкам.",
     )
     max_pages = st.number_input(
@@ -170,13 +176,20 @@ with st.sidebar:
         max_value=20,
         value=20,
         step=1,
+        disabled=scan_entire_site,
+        help="В режиме «весь сайт» это поле отключается.",
     )
     custom_exceptions = st.text_area(
-        "Свои слова-исключения",
+        "Свои слова и модели-исключения",
         value=st.session_state.get("custom_exceptions", ""),
         height=130,
         placeholder="Например:\nBrandName\nвнутренний термин",
         help="Одно слово на строку, либо через запятую. Сохраняется в текущей сессии приложения.",
+    )
+    ignore_site_names = st.checkbox(
+        "Автоматически исключать название сайта, бренды и модели",
+        value=True,
+        help="Белый список собирается из домена, логотипа и названий товаров в H1. Отключите для максимально строгой проверки.",
     )
     expand_dynamic = st.checkbox(
         "Раскрывать динамический контент",
@@ -204,14 +217,16 @@ if run:
         try:
             pages = crawl_site(
                 normalized,
-                max_depth=int(depth),
-                max_pages=int(max_pages),
+                max_depth=None if scan_entire_site else int(depth),
+                max_pages=None if scan_entire_site else int(max_pages),
                 expand_dynamic=expand_dynamic,
                 progress=progress.progress,
                 status=status.info,
             )
+            automatic_whitelist = automatic_exceptions(normalized, pages) if ignore_site_names else set()
             for page in pages:
-                page["issues"] = check_page(page, custom_exceptions)
+                page["issues"] = check_page(page, custom_exceptions, automatic_whitelist)
+            st.session_state["automatic_whitelist_count"] = len(automatic_whitelist)
             st.session_state["pages"] = pages
             progress.progress(1.0)
             status.success(f"Проверка завершена: {len(pages)} страниц")
@@ -239,6 +254,9 @@ else:
             )
 
     st.markdown("### Частые нарушения")
+    automatic_count = st.session_state.get("automatic_whitelist_count", 0)
+    if automatic_count:
+        st.caption(f"Автоматически исключено названий сайта и моделей: {automatic_count}")
     frequent = top_words(pages)
     if frequent:
         st.dataframe(
