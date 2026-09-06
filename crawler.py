@@ -51,6 +51,14 @@ def _same_domain(first: str, second: str) -> bool:
     return bool(left and left == right)
 
 
+def _looks_like_product_url(url: str) -> bool:
+    path = (urlparse(url).path or "").casefold()
+    return (
+        path.endswith(('.html', '.htm'))
+        or any(marker in path for marker in ("/product/", "/products/", "/item/", "/goods/", "/p/"))
+    )
+
+
 def _internal_links(page, base_url: str) -> list[str]:
     links = page.eval_on_selector_all(
         "a[href]",
@@ -193,6 +201,7 @@ def crawl_site(
     start_url: str,
     max_depth: int | None = 0,
     max_pages: int | None = 20,
+    product_sample: int = 3,
     expand_dynamic: bool = True,
     progress=None,
     status=None,
@@ -208,6 +217,7 @@ def crawl_site(
         max_depth = max(0, min(int(max_depth), 3))
     if max_pages is not None:
         max_pages = max(1, min(int(max_pages), 20))
+    product_sample = max(1, min(int(product_sample), 10))
     queue = deque([(start_url, 0)])
     queued = {start_url}
     results: list[dict] = []
@@ -252,7 +262,16 @@ def crawl_site(
                         "links": [],
                     }
                 results.append(result)
+                product_links_seen = 0
+                current_is_product = _looks_like_product_url(url)
                 for link in result.get("links", []):
+                    link_is_product = _looks_like_product_url(link)
+                    if link_is_product and current_is_product:
+                        continue
+                    if link_is_product:
+                        if product_links_seen >= product_sample:
+                            continue
+                        product_links_seen += 1
                     next_depth = depth + 1
                     if (
                         (max_depth is not None and next_depth > max_depth)
