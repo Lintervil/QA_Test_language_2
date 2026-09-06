@@ -128,7 +128,6 @@ def _show_page(page_number: int, page: dict) -> None:
                     "</div></div>",
                     unsafe_allow_html=True,
                 )
-                st.caption("Задача для контент-менеджера · кнопка копирования встроена в блок")
                 st.code(
                     f"Страница: {page['url']}\n- {issue['word']} — «{issue['context']}»",
                     language=None,
