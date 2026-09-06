@@ -22,7 +22,6 @@ except ModuleNotFoundError as error:
     PLAYWRIGHT_IMPORT_ERROR = str(error)
 
 
-MAX_SCREENSHOT_HEIGHT = 6000
 NAVIGATION_TIMEOUT = 35_000
 DEFAULT_HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
@@ -155,17 +154,6 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
     )
     title = page.title()
     description = page.locator("meta[name='description']").get_attribute("content") or ""
-    page_height = page.evaluate("Math.max(document.documentElement.scrollHeight, window.innerHeight)")
-    viewport_width = page.evaluate("window.innerWidth") or 1440
-    screenshot = page.screenshot(
-        clip={
-            "x": 0,
-            "y": 0,
-            "width": min(int(viewport_width), 1440),
-            "height": min(int(page_height), MAX_SCREENSHOT_HEIGHT),
-        },
-        animations="disabled",
-    )
     return {
         "url": url,
         "depth": depth,
@@ -175,7 +163,6 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
         "attributes": attributes,
         "site_terms": site_terms or [],
         "model_terms": model_terms or [],
-        "screenshot": screenshot,
         "issues": [],
         "error": "",
         "links": _internal_links(page, url),
@@ -260,7 +247,6 @@ def crawl_site(
                         "attributes": "",
                         "site_terms": [],
                         "model_terms": [],
-                        "screenshot": None,
                         "issues": [],
                         "error": str(error),
                         "links": [],
