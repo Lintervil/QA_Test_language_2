@@ -19,6 +19,10 @@ ENGLISH_RUN_RE = re.compile(
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[._/+&'-][A-Za-z0-9]+)*")
 URL_RE = re.compile(r"(?:https?://|www\.)\S+|\S+@[\w.-]+\.[A-Za-z]{2,}")
 DOMAIN_SUFFIXES = {"com", "ru", "net", "org", "info", "рф"}
+FILE_SUFFIXES = {
+    "jpg", "jpeg", "png", "gif", "svg", "webp", "mp4", "mp3", "avi",
+    "pdf", "doc", "docx", "xls", "xlsx", "zip", "rar", "csv", "json",
+}
 GENERIC_SITE_TERMS = {
     "www", "shop", "store", "online", "official", "site", "home", "main",
     "catalog", "ru", "com", "net", "org", "info",
@@ -80,11 +84,15 @@ def _is_inside_translation_parentheses(text: str, start: int, end: int) -> bool:
 
 def _is_technical_identifier(candidate: str, text: str, start: int, end: int) -> bool:
     lower = candidate.casefold()
+    if len(candidate) == 1:
+        return True
     if any(marker in lower for marker in ("://", "@")):
         return True
-    if start and text[start - 1] in "._/":
+    if start and text[start - 1] == "/":
         return True
-    if end < len(text) and text[end:end + 1] in "._/":
+    if end < len(text) and text[end] == "/":
+        return True
+    if "." in candidate and candidate.rsplit(".", 1)[-1].casefold() in DOMAIN_SUFFIXES | FILE_SUFFIXES:
         return True
     if (start and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit()):
         return True
@@ -131,7 +139,22 @@ def find_english_issues(
             continue
         if candidate.casefold() in allowlist:
             continue
-        unknown = [token for token in tokens if token.casefold() not in allowlist]
+        candidate_for_tokens = candidate
+        for allowed_phrase in sorted(
+            (item for item in allowlist if " " in item),
+            key=len,
+            reverse=True,
+        ):
+            candidate_for_tokens = re.sub(
+                rf"(?<![A-Za-z]){re.escape(allowed_phrase)}(?![A-Za-z])",
+                " ",
+                candidate_for_tokens,
+                flags=re.IGNORECASE,
+            )
+        unknown = [
+            token for token in TOKEN_RE.findall(candidate_for_tokens)
+            if token.casefold() not in allowlist
+        ]
         if not unknown or _is_inside_translation_parentheses(text, match.start(), match.end()):
             continue
 
