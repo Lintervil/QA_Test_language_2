@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import base64
 import html
 import io
-from urllib.parse import urlparse
+import re
+from urllib.parse import quote, urlparse
 
 import pandas as pd
 import streamlit as st
@@ -68,32 +68,36 @@ def _issue_rows(pages: list[dict]) -> list[dict[str, str]]:
     return rows
 
 
-def _screenshot_copy_button(image: bytes, page_number: int) -> None:
-    if not image:
+def _text_fragment_url(url: str, term: str) -> str:
+    return f"{url}#:~:text={quote(term, safe='')}"
+
+
+def _show_highlighted_text(page: dict) -> None:
+    text_parts = [page.get("text", ""), page.get("attributes", "")]
+    if page.get("title"):
+        text_parts.append(f"HTML title: {page['title']}")
+    if page.get("description"):
+        text_parts.append(f"Meta description: {page['description']}")
+    text = "\n\n".join(part for part in text_parts if part).strip()
+    terms = sorted(
+        {html.escape(issue["word"]) for issue in page.get("issues", []) if issue.get("word")},
+        key=len,
+        reverse=True,
+    )
+    if not text or not terms:
         return
-    encoded = base64.b64encode(image).decode("ascii")
+    highlighted = html.escape(text)
+    pattern = re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
+    highlighted = pattern.sub(lambda match: f"<mark>{match.group(0)}</mark>", highlighted)
+    highlighted = highlighted.replace("\n", "<br>")
     components.html(
         f"""
-        <button id="copy" style="background:#1b2633;color:#e8edf2;border:1px solid #405064;border-radius:6px;padding:7px 11px;cursor:pointer;font:14px system-ui">
-          Скопировать скриншот
-        </button>
-        <span id="message" style="color:#8fa2b5;margin-left:8px;font:13px system-ui"></span>
-        <script>
-        const data = "data:image/png;base64,{encoded}";
-        document.getElementById('copy').onclick = async () => {{
-          const message = document.getElementById('message');
-          try {{
-            const blob = await (await fetch(data)).blob();
-            await navigator.clipboard.write([new ClipboardItem({{'image/png': blob}})]);
-            message.textContent = 'Скопировано';
-          }} catch (error) {{
-            message.textContent = 'Не удалось скопировать, скачайте файл ниже';
-          }}
-        }};
-        </script>
+        <div style="height:520px;overflow:auto;background:#0f151d;color:#e8edf2;border:1px solid #34404e;border-radius:8px;padding:16px;font:14px/1.65 system-ui;white-space:normal">
+          {highlighted}
+        </div>
         """,
-        height=42,
-        scrolling=False,
+        height=550,
+        scrolling=True,
     )
 
 
@@ -102,7 +106,10 @@ def _show_page(page_number: int, page: dict) -> None:
     crawl_error = page.get("error", "")
     label = f"❌ Страница {page_number}: {page['url']} · найдено слов: {len(issues)}" if issues else f"✅ Страница {page_number}: {page['url']} · слов: 0"
     with st.expander(label, expanded=bool(issues or crawl_error)):
-        st.markdown(f"[Открыть страницу в новой вкладке ↗]({_safe(page['url'])})")
+        st.markdown(
+            f"<a href='{_safe(page['url'])}' target='_blank' rel='noopener'>Открыть оригинальную страницу в новой вкладке ↗</a>",
+            unsafe_allow_html=True,
+        )
         if crawl_error:
             st.error(f"Страница не загрузилась: {crawl_error}")
             return
@@ -113,7 +120,9 @@ def _show_page(page_number: int, page: dict) -> None:
                 st.markdown(
                     f"<div class='issue-card'><div class='issue-word'>{_safe(issue['word'])}</div>"
                     f"<div class='issue-meta'>{_safe(issue['context'])}</div>"
-                    f"<div class='issue-meta'><span class='source-pill'>{_safe(issue['source'])}</span></div></div>",
+                    f"<div class='issue-meta'><span class='source-pill'>{_safe(issue['source'])}</span> "
+                    f"<a href='{_safe(_text_fragment_url(page['url'], issue['word']))}' target='_blank' rel='noopener'>"
+                    "Открыть с подсветкой ↗</a></div></div>",
                     unsafe_allow_html=True,
                 )
                 st.caption("Задача для контент-менеджера · кнопка копирования встроена в блок")
@@ -121,24 +130,10 @@ def _show_page(page_number: int, page: dict) -> None:
                     f"Страница: {page['url']}\n- {issue['word']} — «{issue['context']}»",
                     language=None,
                 )
+            st.markdown("#### Текст страницы с подсветкой")
+            _show_highlighted_text(page)
         else:
             st.markdown("<div class='status-ok'>Непереведённый английский текст не найден.</div>", unsafe_allow_html=True)
-
-        image = page.get("screenshot")
-        if image:
-            st.markdown("#### Скриншот страницы")
-            st.image(image, use_container_width=True)
-            left, right = st.columns([1, 2])
-            with left:
-                _screenshot_copy_button(image, page_number)
-            with right:
-                st.download_button(
-                    "Скачать скриншот",
-                    data=image,
-                    file_name=f"translation-check-{page_number}.png",
-                    mime="image/png",
-                    key=f"screenshot-{page_number}",
-                )
 
 
 st.markdown("<div class='eyebrow'>Translation QA / Russian websites</div>", unsafe_allow_html=True)
@@ -201,7 +196,7 @@ with st.sidebar:
         st.session_state.pop("pages", None)
         st.rerun()
     st.divider()
-    st.caption("Скриншоты ограничены высотой 6000 px, чтобы не перегружать бесплатный хостинг.")
+    st.caption("Скриншоты не создаются: отчёт показывает текст страницы с подсветкой найденных фрагментов.")
 
 
 if run:
