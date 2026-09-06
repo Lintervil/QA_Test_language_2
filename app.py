@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import io
-import re
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from checker import automatic_exceptions, check_page, top_words
 from crawler import crawl_site, normalize_url
@@ -68,38 +67,43 @@ def _issue_rows(pages: list[dict]) -> list[dict[str, str]]:
     return rows
 
 
-def _text_fragment_url(url: str, term: str) -> str:
-    return f"{url}#:~:text={quote(term, safe='')}"
+def _recheck_pages(pages: list[dict], custom_exceptions: str, automatic_whitelist: set[str], ignored_words: set[str]) -> None:
+    combined = set(automatic_whitelist) | set(ignored_words)
+    for page in pages:
+        page["issues"] = check_page(page, custom_exceptions, combined)
 
 
-def _show_highlighted_text(page: dict) -> None:
-    text_parts = [page.get("text", ""), page.get("attributes", "")]
-    if page.get("title"):
-        text_parts.append(f"HTML title: {page['title']}")
-    if page.get("description"):
-        text_parts.append(f"Meta description: {page['description']}")
-    text = "\n\n".join(part for part in text_parts if part).strip()
-    terms = sorted(
-        {html.escape(issue["word"]) for issue in page.get("issues", []) if issue.get("word")},
-        key=len,
-        reverse=True,
-    )
-    if not text or not terms:
+def _ignore_word_key(word: str) -> str:
+    digest = hashlib.sha1(word.casefold().encode("utf-8")).hexdigest()[:12]
+    return f"ignore-word-{digest}"
+
+
+def _show_frequent_word_controls(pages: list[dict]) -> None:
+    counts = dict(top_words(pages))
+    ignored = set(st.session_state.get("ignored_words", set()))
+    words = sorted(set(counts) | ignored)
+    if not words:
         return
-    highlighted = html.escape(text)
-    pattern = re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
-    highlighted = pattern.sub(lambda match: f"<mark>{match.group(0)}</mark>", highlighted)
-    highlighted = highlighted.replace("\n", "<br>")
-    components.html(
-        f"""
-        <div style="height:520px;overflow:auto;background:#0f151d;color:#e8edf2;border:1px solid #34404e;border-radius:8px;padding:16px;font:14px/1.65 system-ui;white-space:normal">
-          {highlighted}
-        </div>
-        """,
-        height=550,
-        scrolling=True,
-    )
 
+    st.markdown("### Исключения из текущего отчёта")
+    st.caption("Поставьте галочку рядом со словом, которое является брендом, моделью или постоянным термином. Оно сразу исчезнет из ошибок.")
+    columns = st.columns(2)
+    selected: set[str] = set()
+    for index, word in enumerate(words):
+        count = counts.get(word)
+        label = f"{word} · {count} раз" if count is not None else f"{word} · исключено"
+        with columns[index % 2]:
+            if st.checkbox(label, value=word in ignored, key=_ignore_word_key(word)):
+                selected.add(word)
+
+    if selected != ignored:
+        st.session_state["ignored_words"] = selected
+        _recheck_pages(
+            pages,
+            st.session_state.get("custom_exceptions", ""),
+            set(st.session_state.get("automatic_whitelist", set())),
+            selected,
+        )
 
 def _show_page(page_number: int, page: dict) -> None:
     issues = page.get("issues", [])
@@ -121,8 +125,7 @@ def _show_page(page_number: int, page: dict) -> None:
                     f"<div class='issue-card'><div class='issue-word'>{_safe(issue['word'])}</div>"
                     f"<div class='issue-meta'>{_safe(issue['context'])}</div>"
                     f"<div class='issue-meta'><span class='source-pill'>{_safe(issue['source'])}</span> "
-                    f"<a href='{_safe(_text_fragment_url(page['url'], issue['word']))}' target='_blank' rel='noopener'>"
-                    "Открыть с подсветкой ↗</a></div></div>",
+                    "</div></div>",
                     unsafe_allow_html=True,
                 )
                 st.caption("Задача для контент-менеджера · кнопка копирования встроена в блок")
@@ -130,8 +133,6 @@ def _show_page(page_number: int, page: dict) -> None:
                     f"Страница: {page['url']}\n- {issue['word']} — «{issue['context']}»",
                     language=None,
                 )
-            st.markdown("#### Текст страницы с подсветкой")
-            _show_highlighted_text(page)
         else:
             st.markdown("<div class='status-ok'>Непереведённый английский текст не найден.</div>", unsafe_allow_html=True)
 
@@ -153,14 +154,14 @@ with st.sidebar:
     )
     scan_entire_site = st.checkbox(
         "Проверять весь сайт без лимита",
-        value=False,
-        help="Обходит все найденные внутренние ссылки без ограничения страниц и глубины. Большие сайты могут проверяться долго.",
+        value=True,
+        help="По умолчанию обходит все найденные внутренние ссылки. Большие сайты могут проверяться долго.",
     )
     depth = st.number_input(
         "Глубина обхода",
         min_value=0,
         max_value=3,
-        value=0,
+        value=3,
         step=1,
         disabled=scan_entire_site,
         help="0 — только указанная страница, 1 — ещё один переход по внутренним ссылкам.",
@@ -173,6 +174,14 @@ with st.sidebar:
         step=1,
         disabled=scan_entire_site,
         help="В режиме «весь сайт» это поле отключается.",
+    )
+    product_sample = st.number_input(
+        "Карточек товара на раздел",
+        min_value=1,
+        max_value=10,
+        value=3,
+        step=1,
+        help="Из каждой страницы каталога проверяется несколько карточек, а не все товары.",
     )
     custom_exceptions = st.text_area(
         "Свои слова и модели-исключения",
@@ -196,7 +205,7 @@ with st.sidebar:
         st.session_state.pop("pages", None)
         st.rerun()
     st.divider()
-    st.caption("Скриншоты не создаются: отчёт показывает текст страницы с подсветкой найденных фрагментов.")
+    st.caption("Для страниц каталога проверяются несколько карточек товара, чтобы не тратить время на одинаковые шаблоны.")
 
 
 if run:
@@ -214,11 +223,17 @@ if run:
                 normalized,
                 max_depth=None if scan_entire_site else int(depth),
                 max_pages=None if scan_entire_site else int(max_pages),
+                product_sample=int(product_sample),
                 expand_dynamic=expand_dynamic,
                 progress=progress.progress,
                 status=status.info,
             )
             automatic_whitelist = automatic_exceptions(normalized, pages) if ignore_site_names else set()
+            st.session_state["ignored_words"] = set()
+            st.session_state["automatic_whitelist"] = automatic_whitelist
+            for key in list(st.session_state):
+                if key.startswith("ignore-word-"):
+                    del st.session_state[key]
             for page in pages:
                 page["issues"] = check_page(page, custom_exceptions, automatic_whitelist)
             st.session_state["automatic_whitelist_count"] = len(automatic_whitelist)
@@ -233,6 +248,7 @@ pages = st.session_state.get("pages")
 if pages is None:
     st.info("Укажите сайт слева и нажмите «Запустить проверку».")
 else:
+    _show_frequent_word_controls(pages)
     issue_count = sum(len(page.get("issues", [])) for page in pages)
     error_pages = sum(bool(page.get("issues")) for page in pages)
     failed_pages = sum(bool(page.get("error")) for page in pages)
