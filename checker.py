@@ -19,7 +19,6 @@ ENGLISH_RUN_RE = re.compile(
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[._/+&'-][A-Za-z0-9]+)*")
 DOMAIN_SUFFIXES = {"com", "ru", "net", "org", "info", "рф", "by", "kz"}
 
-# НЮАНС №1: Расширенный список расширений статики и медиа
 FILE_SUFFIXES = {
     "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "ico",
     "mp4", "mp3", "avi", "mov", "webm", "mkv",
@@ -32,7 +31,6 @@ GENERIC_SITE_TERMS = {
     "catalog", "ru", "com", "net", "org", "info",
 }
 
-# Регулярка для технических единиц бытовой техники (V, W, Hz, rpm, mm, cm, kg, dB и т.д.)
 TECHNICAL_UNITS_RE = re.compile(
     r"^\d+(?:[.,]\d+)?\s*(?:v|w|kw|kwh|a|ma|hz|khz|mhz|ghz|db|rpm|kg|g|mg|l|ml|mm|cm|m|km|bar|pa|kpa|btu|din|ip\d{2})$",
     re.IGNORECASE
@@ -77,17 +75,13 @@ def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
 
 
 def _is_inside_translation_parentheses(text: str, start: int, end: int) -> bool:
-    """
-    НЮАНС №2: Проверяет, находится ли слово в скобках вида:
-    'Посудомоечная машина (Dishwasher)' или [Built-in].
-    """
+    """Проверяет конструкцию 'Русский текст (English)' без выхода за пределы строки."""
     before = text[:start]
     open_round = before.rfind("(")
     close_round = before.rfind(")")
     open_square = before.rfind("[")
     close_square = before.rfind("]")
 
-    # Определяем тип скобки
     open_idx = -1
     close_char = ""
     if open_round > close_round:
@@ -107,7 +101,7 @@ def _is_inside_translation_parentheses(text: str, start: int, end: int) -> bool:
 
     close_idx = end + close_idx_rel
 
-    # Скобки не должны разрываться абзацами или быть длиннее 100 символов
+    # Скобка не должна быть длиннее 100 символов или содержать перенос строки
     inside_content = text[open_idx:close_idx + 1]
     if "\n" in inside_content or len(inside_content) > 100:
         return False
@@ -118,7 +112,6 @@ def _is_inside_translation_parentheses(text: str, start: int, end: int) -> bool:
 
 
 def _is_technical_identifier(candidate: str, text: str, start: int, end: int) -> bool:
-    """НЮАНС №1 и характеристики: отсекает файлы, габариты, артикулы и единицы измерения."""
     lower = candidate.casefold()
     if len(candidate) == 1:
         return True
@@ -129,23 +122,22 @@ def _is_technical_identifier(candidate: str, text: str, start: int, end: int) ->
     if end < len(text) and text[end] in {"/", "\\"}:
         return True
 
-    # Расширения файлов (image.png, clip.mp4)
+    # Расширения файлов (video.mp4, pic.png)
     if "." in candidate and candidate.rsplit(".", 1)[-1].casefold() in (DOMAIN_SUFFIXES | FILE_SUFFIXES):
         return True
 
-    # Единицы измерений (напр. 220v, 1400rpm, 50hz)
+    # Единицы измерений техники (220v, 1400rpm, 50hz)
     if TECHNICAL_UNITS_RE.match(candidate):
         return True
 
-    # Габариты (напр. 60x60x85)
+    # Габариты (60x60x85)
     if re.fullmatch(r"\d+x\d+(?:x\d+)?", lower):
         return True
 
-    # Если спереди или сзади вплотную примыкает цифра
     if (start and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit()):
         return True
 
-    # Смесь букв и цифр (артикулы моделей: SPV4HMX14Q, BWD421PRO)
+    # Артикулы моделей с цифрами (SPV4HMX14Q)
     if any(char.isdigit() for char in candidate) and any(char.isalpha() for char in candidate):
         return True
 
@@ -239,7 +231,7 @@ def check_page(
     exceptions = parse_exceptions(custom_exceptions) | parse_exceptions(automatic_whitelist)
     issues: list[dict[str, str]] = []
 
-    # Не ищем ошибки на страницах, вернувших HTTP-ошибку
+    # Не тратим время на страницы, которые вернули ошибку загрузки
     if page.get("error"):
         return []
 
