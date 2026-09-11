@@ -1,13 +1,26 @@
 """Built-in whitelist for brands, formats, abbreviations and identifiers."""
 
 BASE_EXCEPTIONS = {
-    # Бренды и производители
+    # Копирайты шаблона и сквозные элементы подвала
+    "kvalitet trade", "max max", "recaptcha", "design&technologies",
+    "consumer electronics", "appliances",
+
+    # Бренды и производители техники
     "gorenje", "bosch", "samsung", "lg", "apple", "philips", "siemens",
     "haier", "beko", "miele", "electrolux", "aeg", "xiaomi", "google",
     "sony", "panasonic", "toshiba", "asus", "lenovo", "hp", "huawei",
     "honor", "tesla", "ikea", "whirlpool", "indesit", "karcher", "tefal",
     "braun", "nespresso", "dolce gusto", "airpods", "iphone", "ipad",
     "simplicity", "ora-ito", "karim rashid",
+
+    # Фирменные технологии бытовой техники (оставляются на латинице)
+    "crispzone", "silvermatte", "aquaclean", "supersize", "multibox",
+    "ionair", "powerboost", "zerozone", "frostless", "gentleclose",
+    "simpleslide", "cleanzone", "multiclack", "totalweight", "carbotech",
+    "allergycare", "stainexpert", "perfectgrill", "moodlite", "iq sensor",
+    "homechef", "no frost", "total no frost", "hi-light", "aqua stop",
+    "aquastop", "touch control", "soft close", "child lock", "super cool",
+    "super freeze", "fast freeze", "adapttech", "dynamooling", "inverterpowerdrive",
 
     # Форматы файлов и медиа-расширения
     "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "ico",
@@ -38,9 +51,6 @@ BASE_EXCEPTIONS = {
     # Платежные и операционные системы
     "visa", "mastercard", "mir", "paypal", "android", "ios", "windows", "macos", "linux",
 
-    # Характеристики бытовой техники и элементы интерфейса
-    "tv", "smart", "eco", "inverter", "wifi", "no frost", "total no frost",
-    "hi-light", "aqua stop", "aquastop", "touch control", "soft close",
-    "child lock", "super cool", "super freeze", "fast freeze",
-    "online", "outlet", "premium", "alt", "title", "recaptcha",
+    # Общие термины интернет-магазина
+    "tv", "smart", "eco", "inverter", "wifi", "online", "outlet", "premium", "alt", "title",
 }
