@@ -23,19 +23,17 @@ GENERIC_SITE_TERMS = {
     "catalog", "ru", "com", "net", "org", "info",
 }
 
-# Регулярка для отсечения технических единиц бытовой техники
+# Отсечение единиц измерения бытовой техники (220V, 1400rpm, 50Hz, 10kg и др.)
 TECHNICAL_UNITS_RE = re.compile(
     r"^\d+(?:[.,]\d+)?\s*(?:v|w|kw|kwh|a|ma|hz|khz|mhz|ghz|db|rpm|kg|g|mg|l|ml|mm|cm|m|km|bar|pa|kpa|btu|din|ip\d{2})$",
     re.IGNORECASE
 )
 
-# НЮАНС №2: Конструкции вида «Русский текст (English text)» или [English]
-# Вырезает латиницу в скобках, если перед ними идет русский текст
+# Вырезание формата «Русское слово (English)» или [English]
 BILINGUAL_RE = re.compile(
     r"([А-Яа-яЁё0-9\s\-–—/]{1,80})\s*[\(\[][A-Za-z0-9\s\-–—,./+#'\"]{1,100}[\)\]]"
 )
 
-# НЮАНС №1: Ссылки и файлы
 URL_RE = re.compile(r"https?://\S+|www\.\S+")
 FILES_RE = re.compile(
     r"\b[\w\-.]+\.(?:jpg|jpeg|png|gif|svg|webp|avif|mp4|webm|avi|mov|mp3|pdf|zip|rar|css|js|json|xml)\b",
@@ -54,7 +52,7 @@ def parse_exceptions(value: str | Iterable[str] | None) -> set[str]:
 
 
 def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
-    """Быстрый сбор домена и моделей без создания мусорных фраз."""
+    """Быстрый сбор названия бренда из домена и кодов моделей из H1/title."""
     result = set()
     host = urlparse(start_url).hostname or ""
     for part in host.split("."):
@@ -74,7 +72,7 @@ def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
 
 
 def is_technical_token(word: str) -> bool:
-    """Проверка, является ли слово артикулом, габаритом или системным обозначением."""
+    """Проверка на габариты, артикулы и системные токены."""
     if len(word) <= 1:
         return True
 
@@ -82,15 +80,15 @@ def is_technical_token(word: str) -> bool:
     if lower in DOMAIN_SUFFIXES or lower in FILE_SUFFIXES:
         return True
 
-    # Габариты (60x60, 595x595x564)
+    # Габариты (например, 60x60, 595x595x564)
     if re.fullmatch(r"\d+x\d+(?:x\d+)?", lower):
         return True
 
-    # Единицы измерений техники (220v, 1400rpm, 50hz)
+    # Единицы измерений техники
     if TECHNICAL_UNITS_RE.match(word):
         return True
 
-    # Артикулы моделей с цифрами и буквами (BOP798S54X, SPV4HMX14Q)
+    # Артикулы моделей со смесью букв и цифр (BOP798S54X, SPV4HMX14Q, DNS92)
     has_digit = any(c.isdigit() for c in word)
     has_alpha = any(c.isalpha() for c in word)
     if has_digit and has_alpha:
@@ -104,15 +102,11 @@ def is_technical_token(word: str) -> bool:
 
 
 def clean_text_fast(text: str, multiword_exceptions: list[str]) -> str:
-    """Мгновенная очистка текста в 3 шага."""
-    # 1. Вырезаем формат «Слово (Word)»
+    """Очистка текста от формата перевода, ссылок и медиа за один проход."""
     cleaned = BILINGUAL_RE.sub(r"\1 ()", text)
-
-    # 2. Вырезаем URL и имена файлов
     cleaned = URL_RE.sub(" ", cleaned)
     cleaned = FILES_RE.sub(" ", cleaned)
 
-    # 3. Вырезаем словосочетания из исключений за один проход
     if multiword_exceptions:
         pattern = r"\b(?:" + "|".join(re.escape(w) for w in multiword_exceptions) + r")\b"
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
@@ -139,12 +133,10 @@ def find_english_issues(
 
     cleaned = clean_text_fast(text, multiword_exceptions)
 
-    # Находим все английские слова
     tokens = list(re.finditer(r"\b[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*\b", cleaned))
     if not tokens:
         return []
 
-    # Отбираем только неизвестные (проблемные) слова
     problem_tokens = []
     for m in tokens:
         word = m.group(0)
@@ -155,7 +147,6 @@ def find_english_issues(
     if not problem_tokens:
         return []
 
-    # Склеиваем идущие подряд слова в целые фразы (например: 'Add' + 'to' + 'cart')
     issues: list[dict[str, str]] = []
     seen: set[str] = set()
 
@@ -163,7 +154,6 @@ def find_english_issues(
     for token in problem_tokens[1:]:
         prev = current_group[-1]
         gap = cleaned[prev.end():token.start()]
-        # Если между словами только пробелы (длиной не более 3 символов) — объединяем во фразу
         if gap.strip() == "" and len(gap) <= 3:
             current_group.append(token)
         else:
@@ -201,7 +191,6 @@ def check_page(
         | parse_exceptions(automatic_whitelist)
     )
 
-    # Список фраз с пробелами, отсортированный по длине
     multiword_exceptions = sorted([w for w in allowlist if " " in w], key=len, reverse=True)
 
     issues: list[dict[str, str]] = []
@@ -209,15 +198,14 @@ def check_page(
     # 1. Текст страницы
     issues.extend(find_english_issues(page.get("text", ""), "Видимый текст", allowlist, multiword_exceptions))
 
-    # 2. Атрибуты (alt, title, placeholder)
+    # 2. Атрибуты интерфейса (alt, title, placeholder)
     attrs = re.sub(r"(?:^|\n)(?:alt|title|placeholder|aria-label):\s*", "\n", page.get("attributes", ""), flags=re.IGNORECASE)
     issues.extend(find_english_issues(attrs, "Атрибуты интерфейса", allowlist, multiword_exceptions))
 
-    # 3. Мета-теги
+    # 3. Мета-теги страницы
     issues.extend(find_english_issues(page.get("title", ""), "HTML title", allowlist, multiword_exceptions))
     issues.extend(find_english_issues(page.get("description", ""), "Meta description", allowlist, multiword_exceptions))
 
-    # Финальная дедупликация
     unique: list[dict[str, str]] = []
     seen = set()
     for issue in issues:
