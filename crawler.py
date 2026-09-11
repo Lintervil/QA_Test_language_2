@@ -30,12 +30,13 @@ MEDIA_EXTENSIONS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Черный список URL: полностью отсекает мусорные разделы шаблона сети
+# Черный список URL: полностью отсекает технический и служебный мусор
 USELESS_URL_MARKERS = (
     "/glossary",
     "param=",
     "/reviews",
     "/recommend/",
+    "recommend",
     "/personal-data",
     "/favorites",
     "/compare",
@@ -49,6 +50,10 @@ USELESS_URL_MARKERS = (
     "/showroom",
     "/designers",
     "/sales",
+    "type-hit",
+    "type-nov",
+    "type-akcii",
+    "/calc",
     "mailto:",
     "tel:",
     "javascript:",
@@ -95,23 +100,14 @@ def _same_domain(first: str, second: str) -> bool:
 
 
 def _looks_like_product_url(url: str) -> bool:
-    """Определяет карточку товара для /catalog/, /market/ и прямых ссылок."""
+    """На всех сайтах сети карточка товара оканчивается на .html."""
     path = (urlparse(url).path or "").strip("/").casefold()
     if not path or is_useless_url(url):
         return False
 
-    if path.endswith((".html", ".htm")) or any(
+    return path.endswith((".html", ".htm")) or any(
         marker in path for marker in ("/product/", "/products/", "/item/", "/goods/", "/p/")
-    ):
-        return True
-
-    # Структура каталога: catalog|market / категория / конкретная-модель
-    parts = [p for p in path.split("/") if p]
-    if len(parts) >= 3 and parts[0] in {"catalog", "market"}:
-        if parts[1] not in {"group", "type-hit", "type-nov", "complects", "calc"} and parts[2] not in {"recommend", "filter"}:
-            return True
-
-    return False
+    )
 
 
 def _looks_like_catalog_url(url: str) -> bool:
@@ -325,8 +321,8 @@ def crawl_site(
     product_sample = max(1, min(int(product_sample), 5))
 
     # Сбалансированные квоты
-    LIMIT_CATALOG = int(total_limit * 0.35)   # До 35% категорий
-    LIMIT_PRODUCT = int(total_limit * 0.45)   # До 45% товаров
+    LIMIT_CATALOG = int(total_limit * 0.30)   # До 30% категорий
+    LIMIT_PRODUCT = int(total_limit * 0.55)   # До 55% реальных товаров
     LIMIT_CONTENT = total_limit - (LIMIT_CATALOG + LIMIT_PRODUCT)
 
     counts = {"catalog": 0, "product": 0, "content": 0}
@@ -355,7 +351,6 @@ def crawl_site(
             ignore_https_errors=True,
         )
 
-        # Отсекаем загрузку тяжелых медиафайлов
         context.route(
             "**/*.{png,jpg,jpeg,webp,gif,svg,mp4,webm,avi,woff,woff2,ttf,eot}",
             lambda route: route.abort(),
@@ -393,7 +388,6 @@ def crawl_site(
                 nav_links = result.get("nav_links", [])
 
                 if kind == "home":
-                    # С главной берем служебные разделы и статьи
                     for link in nav_links:
                         c_type = classify_url(link)
                         if c_type in {"info", "article"} and counts["content"] < LIMIT_CONTENT and link not in enqueued:
@@ -401,7 +395,6 @@ def crawl_site(
                             counts["content"] += 1
                             queue.append((link, depth + 1, c_type))
 
-                    # Берем основные категории каталога
                     for link in nav_links + links:
                         if classify_url(link) == "catalog" and counts["catalog"] < LIMIT_CATALOG and link not in enqueued:
                             enqueued.add(link)
@@ -409,21 +402,21 @@ def crawl_site(
                             queue.append((link, depth + 1, "catalog"))
 
                 elif kind == "catalog":
-                    # 1. Подкатегории
-                    subcats = [l for l in links if classify_url(l) == "catalog" and l not in enqueued]
-                    for sub in subcats[:3]:
-                        if counts["catalog"] < LIMIT_CATALOG:
-                            enqueued.add(sub)
-                            counts["catalog"] += 1
-                            queue.appendleft((sub, depth + 1, "catalog"))
-
-                    # 2. Немедленно ставим 1-2 товара из этой категории в начало очереди
-                    prods = [l for l in links if classify_url(l) == "product" and l not in enqueued]
+                    # 1. Приоритет: извлекаем товары и СРАЗУ добавляем в начало очереди
+                    prods = [l for l in links if _looks_like_product_url(l) and l not in enqueued]
                     for prod in prods[:product_sample]:
                         if counts["product"] < LIMIT_PRODUCT:
                             enqueued.add(prod)
                             counts["product"] += 1
                             queue.appendleft((prod, depth + 1, "product"))
+
+                    # 2. Подкатегории ставим в общий конец очереди
+                    subcats = [l for l in links if _looks_like_catalog_url(l) and l not in enqueued]
+                    for sub in subcats[:2]:
+                        if counts["catalog"] < LIMIT_CATALOG:
+                            enqueued.add(sub)
+                            counts["catalog"] += 1
+                            queue.append((sub, depth + 1, "catalog"))
 
                 elif kind in {"info", "article"}:
                     for link in links:
