@@ -1,4 +1,4 @@
-"""Detection of untranslated English text in Russian website content."""
+"""Ultra-fast detection of untranslated English text in Russian website content."""
 
 from __future__ import annotations
 
@@ -9,14 +9,6 @@ from urllib.parse import urlparse
 
 from exceptions import BASE_EXCEPTIONS
 
-
-ENGLISH_RUN_RE = re.compile(
-    r"(?<![A-Za-z])"
-    r"(?:[A-Za-z][A-Za-z0-9]*(?:[._/+&'-][A-Za-z0-9]+)*)"
-    r"(?:\s+(?:[A-Za-z][A-Za-z0-9]*(?:[._/+&'-][A-Za-z0-9]+)*)){0,6}"
-    r"(?![A-Za-z])"
-)
-TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[._/+&'-][A-Za-z0-9]+)*")
 DOMAIN_SUFFIXES = {"com", "ru", "net", "org", "info", "рф", "by", "kz"}
 
 FILE_SUFFIXES = {
@@ -31,8 +23,22 @@ GENERIC_SITE_TERMS = {
     "catalog", "ru", "com", "net", "org", "info",
 }
 
+# Регулярка для отсечения технических единиц бытовой техники
 TECHNICAL_UNITS_RE = re.compile(
     r"^\d+(?:[.,]\d+)?\s*(?:v|w|kw|kwh|a|ma|hz|khz|mhz|ghz|db|rpm|kg|g|mg|l|ml|mm|cm|m|km|bar|pa|kpa|btu|din|ip\d{2})$",
+    re.IGNORECASE
+)
+
+# НЮАНС №2: Конструкции вида «Русский текст (English text)» или [English]
+# Вырезает латиницу в скобках, если перед ними идет русский текст
+BILINGUAL_RE = re.compile(
+    r"([А-Яа-яЁё0-9\s\-–—/]{1,80})\s*[\(\[][A-Za-z0-9\s\-–—,./+#'\"]{1,100}[\)\]]"
+)
+
+# НЮАНС №1: Ссылки и файлы
+URL_RE = re.compile(r"https?://\S+|www\.\S+")
+FILES_RE = re.compile(
+    r"\b[\w\-.]+\.(?:jpg|jpeg|png|gif|svg|webp|avif|mp4|webm|avi|mov|mp3|pdf|zip|rar|css|js|json|xml)\b",
     re.IGNORECASE
 )
 
@@ -48,179 +54,137 @@ def parse_exceptions(value: str | Iterable[str] | None) -> set[str]:
 
 
 def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
-    values: list[str] = []
+    """Быстрый сбор домена и моделей без создания мусорных фраз."""
+    result = set()
     host = urlparse(start_url).hostname or ""
-    values.extend(re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", host))
-    for page in pages:
-        values.extend(page.get("site_terms", []))
-        values.extend(page.get("model_terms", []))
+    for part in host.split("."):
+        if len(part) > 2 and part.casefold() not in GENERIC_SITE_TERMS:
+            result.add(part.casefold())
 
-    result: set[str] = set()
-    for value in values:
-        for match in ENGLISH_RUN_RE.finditer(str(value)):
-            phrase = match.group(0).strip(" .,:;!?\"'«»()[]{}")
-            if not phrase:
-                continue
-            tokens = TOKEN_RE.findall(phrase)
-            if not tokens:
-                continue
-            if phrase.casefold() not in GENERIC_SITE_TERMS:
-                result.add(phrase.casefold())
-            for token in tokens:
-                if token.casefold() in GENERIC_SITE_TERMS or len(token) < 3:
+    for page in pages:
+        raw_terms = page.get("site_terms", []) + page.get("model_terms", [])
+        for term in raw_terms:
+            for token in re.findall(r"\b[A-Za-z0-9-]{2,}\b", str(term)):
+                t_lower = token.casefold()
+                if t_lower in GENERIC_SITE_TERMS or len(t_lower) < 3:
                     continue
-                if any(char.isdigit() for char in token) or token[:1].isupper() or token.isupper():
-                    result.add(token.casefold())
+                if any(c.isdigit() for c in token) or token.isupper() or token[0].isupper():
+                    result.add(t_lower)
     return result
 
 
-def _is_inside_translation_parentheses(text: str, start: int, end: int) -> bool:
-    """Проверяет конструкцию 'Русский текст (English)' без выхода за пределы строки."""
-    before = text[:start]
-    open_round = before.rfind("(")
-    close_round = before.rfind(")")
-    open_square = before.rfind("[")
-    close_square = before.rfind("]")
-
-    open_idx = -1
-    close_char = ""
-    if open_round > close_round:
-        open_idx = open_round
-        close_char = ")"
-    elif open_square > close_square:
-        open_idx = open_square
-        close_char = "]"
-
-    if open_idx == -1:
-        return False
-
-    after = text[end:]
-    close_idx_rel = after.find(close_char)
-    if close_idx_rel < 0:
-        return False
-
-    close_idx = end + close_idx_rel
-
-    # Скобка не должна быть длиннее 100 символов или содержать перенос строки
-    inside_content = text[open_idx:close_idx + 1]
-    if "\n" in inside_content or len(inside_content) > 100:
-        return False
-
-    # До открывающей скобки должен присутствовать русский текст
-    before_bracket = before[:open_idx]
-    return bool(re.search(r"[А-Яа-яЁё]", before_bracket[-80:]))
-
-
-def _is_technical_identifier(candidate: str, text: str, start: int, end: int) -> bool:
-    lower = candidate.casefold()
-    if len(candidate) == 1:
-        return True
-    if any(marker in lower for marker in ("://", "@")):
-        return True
-    if start and text[start - 1] in {"/", "\\"}:
-        return True
-    if end < len(text) and text[end] in {"/", "\\"}:
+def is_technical_token(word: str) -> bool:
+    """Проверка, является ли слово артикулом, габаритом или системным обозначением."""
+    if len(word) <= 1:
         return True
 
-    # Расширения файлов (video.mp4, pic.png)
-    if "." in candidate and candidate.rsplit(".", 1)[-1].casefold() in (DOMAIN_SUFFIXES | FILE_SUFFIXES):
+    lower = word.casefold()
+    if lower in DOMAIN_SUFFIXES or lower in FILE_SUFFIXES:
         return True
 
-    # Единицы измерений техники (220v, 1400rpm, 50hz)
-    if TECHNICAL_UNITS_RE.match(candidate):
-        return True
-
-    # Габариты (60x60x85)
+    # Габариты (60x60, 595x595x564)
     if re.fullmatch(r"\d+x\d+(?:x\d+)?", lower):
         return True
 
-    if (start and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit()):
+    # Единицы измерений техники (220v, 1400rpm, 50hz)
+    if TECHNICAL_UNITS_RE.match(word):
         return True
 
-    # Артикулы моделей с цифрами (SPV4HMX14Q)
-    if any(char.isdigit() for char in candidate) and any(char.isalpha() for char in candidate):
+    # Артикулы моделей с цифрами и буквами (BOP798S54X, SPV4HMX14Q)
+    has_digit = any(c.isdigit() for c in word)
+    has_alpha = any(c.isalpha() for c in word)
+    if has_digit and has_alpha:
         return True
 
-    # Аббревиатуры из заглавных букв (LED, OLED, NFC)
-    if re.fullmatch(r"[A-Z]{2,}(?:[-/][A-Z0-9]+)*", candidate):
-        return True
-
-    if lower in DOMAIN_SUFFIXES:
+    # Аббревиатуры из заглавных букв (LED, OLED, NFC, USB)
+    if re.fullmatch(r"[A-Z0-9]{2,}(?:[-/][A-Z0-9]+)*", word):
         return True
 
     return False
 
 
-def _context(text: str, start: int, end: int, radius: int = 62) -> str:
+def clean_text_fast(text: str, multiword_exceptions: list[str]) -> str:
+    """Мгновенная очистка текста в 3 шага."""
+    # 1. Вырезаем формат «Слово (Word)»
+    cleaned = BILINGUAL_RE.sub(r"\1 ()", text)
+
+    # 2. Вырезаем URL и имена файлов
+    cleaned = URL_RE.sub(" ", cleaned)
+    cleaned = FILES_RE.sub(" ", cleaned)
+
+    # 3. Вырезаем словосочетания из исключений за один проход
+    if multiword_exceptions:
+        pattern = r"\b(?:" + "|".join(re.escape(w) for w in multiword_exceptions) + r")\b"
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+
+    return cleaned
+
+
+def _make_context(original_text: str, start: int, end: int, radius: int = 50) -> str:
     left = max(0, start - radius)
-    right = min(len(text), end + radius)
-    value = re.sub(r"\s+", " ", text[left:right]).strip()
-    if left:
-        value = "..." + value
-    if right < len(text):
-        value += "..."
-    return value
+    right = min(len(original_text), end + radius)
+    snippet = re.sub(r"\s+", " ", original_text[left:right]).strip()
+    return f"...{snippet}..."
 
 
 def find_english_issues(
     text: str,
     source: str,
-    custom_exceptions: str | Iterable[str] | None = None,
+    allowlist: set[str],
+    multiword_exceptions: list[str],
     limit: int = 200,
 ) -> list[dict[str, str]]:
-    if not text:
+    if not text or len(text.strip()) == 0:
         return []
 
-    allowlist = {item.casefold() for item in BASE_EXCEPTIONS} | parse_exceptions(custom_exceptions)
+    cleaned = clean_text_fast(text, multiword_exceptions)
+
+    # Находим все английские слова
+    tokens = list(re.finditer(r"\b[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*\b", cleaned))
+    if not tokens:
+        return []
+
+    # Отбираем только неизвестные (проблемные) слова
+    problem_tokens = []
+    for m in tokens:
+        word = m.group(0)
+        if word.casefold() in allowlist or is_technical_token(word):
+            continue
+        problem_tokens.append(m)
+
+    if not problem_tokens:
+        return []
+
+    # Склеиваем идущие подряд слова в целые фразы (например: 'Add' + 'to' + 'cart')
     issues: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[str] = set()
 
-    for match in ENGLISH_RUN_RE.finditer(text):
-        candidate = match.group(0).strip(" .,:;!?\"'«»()[]{}")
-        if not candidate or _is_technical_identifier(candidate, text, match.start(), match.end()):
-            continue
-        tokens = TOKEN_RE.findall(candidate)
-        if not tokens:
-            continue
-        if candidate.casefold() in allowlist:
-            continue
+    current_group = [problem_tokens[0]]
+    for token in problem_tokens[1:]:
+        prev = current_group[-1]
+        gap = cleaned[prev.end():token.start()]
+        # Если между словами только пробелы (длиной не более 3 символов) — объединяем во фразу
+        if gap.strip() == "" and len(gap) <= 3:
+            current_group.append(token)
+        else:
+            phrase = " ".join(t.group(0) for t in current_group)
+            start_pos = current_group[0].start()
+            end_pos = current_group[-1].end()
+            ctx = _make_context(text, start_pos, end_pos)
+            if phrase.casefold() not in seen:
+                seen.add(phrase.casefold())
+                issues.append({"word": phrase, "context": ctx, "source": source})
+            current_group = [token]
 
-        candidate_for_tokens = candidate
-        for allowed_phrase in sorted(
-            (item for item in allowlist if " " in item),
-            key=len,
-            reverse=True,
-        ):
-            candidate_for_tokens = re.sub(
-                rf"(?<![A-Za-z]){re.escape(allowed_phrase)}(?![A-Za-z])",
-                " ",
-                candidate_for_tokens,
-                flags=re.IGNORECASE,
-            )
+    if current_group:
+        phrase = " ".join(t.group(0) for t in current_group)
+        start_pos = current_group[0].start()
+        end_pos = current_group[-1].end()
+        ctx = _make_context(text, start_pos, end_pos)
+        if phrase.casefold() not in seen:
+            issues.append({"word": phrase, "context": ctx, "source": source})
 
-        unknown = [
-            token for token in TOKEN_RE.findall(candidate_for_tokens)
-            if token.casefold() not in allowlist and not TECHNICAL_UNITS_RE.match(token)
-        ]
-
-        if not unknown or _is_inside_translation_parentheses(text, match.start(), match.end()):
-            continue
-
-        term = " ".join(unknown)
-        key = (term.casefold(), source, _context(text, match.start(), match.end()).casefold())
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append(
-            {
-                "word": term,
-                "context": _context(text, match.start(), match.end()),
-                "source": source,
-            }
-        )
-        if len(issues) >= limit:
-            break
-    return issues
+    return issues[:limit]
 
 
 def check_page(
@@ -228,32 +192,40 @@ def check_page(
     custom_exceptions: str | Iterable[str] | None = None,
     automatic_whitelist: str | Iterable[str] | None = None,
 ) -> list[dict[str, str]]:
-    exceptions = parse_exceptions(custom_exceptions) | parse_exceptions(automatic_whitelist)
-    issues: list[dict[str, str]] = []
-
-    # Не тратим время на страницы, которые вернули ошибку загрузки
     if page.get("error"):
         return []
 
-    issues.extend(find_english_issues(page.get("text", ""), "Видимый текст", exceptions))
-
-    attributes = re.sub(
-        r"(?:^|\n)(?:alt|title|placeholder|aria-label):\s*",
-        "\n",
-        page.get("attributes", ""),
-        flags=re.IGNORECASE,
+    allowlist = (
+        {item.casefold() for item in BASE_EXCEPTIONS}
+        | parse_exceptions(custom_exceptions)
+        | parse_exceptions(automatic_whitelist)
     )
-    issues.extend(find_english_issues(attributes, "Атрибуты интерфейса", exceptions))
-    issues.extend(find_english_issues(page.get("title", ""), "HTML title", exceptions))
-    issues.extend(find_english_issues(page.get("description", ""), "Meta description", exceptions))
 
+    # Список фраз с пробелами, отсортированный по длине
+    multiword_exceptions = sorted([w for w in allowlist if " " in w], key=len, reverse=True)
+
+    issues: list[dict[str, str]] = []
+
+    # 1. Текст страницы
+    issues.extend(find_english_issues(page.get("text", ""), "Видимый текст", allowlist, multiword_exceptions))
+
+    # 2. Атрибуты (alt, title, placeholder)
+    attrs = re.sub(r"(?:^|\n)(?:alt|title|placeholder|aria-label):\s*", "\n", page.get("attributes", ""), flags=re.IGNORECASE)
+    issues.extend(find_english_issues(attrs, "Атрибуты интерфейса", allowlist, multiword_exceptions))
+
+    # 3. Мета-теги
+    issues.extend(find_english_issues(page.get("title", ""), "HTML title", allowlist, multiword_exceptions))
+    issues.extend(find_english_issues(page.get("description", ""), "Meta description", allowlist, multiword_exceptions))
+
+    # Финальная дедупликация
     unique: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen = set()
     for issue in issues:
         key = (issue["word"].casefold(), issue["source"], issue["context"].casefold())
         if key not in seen:
             seen.add(key)
             unique.append(issue)
+
     return unique
 
 
