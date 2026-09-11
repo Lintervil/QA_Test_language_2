@@ -15,7 +15,6 @@ try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_IMPORT_ERROR = ""
 except ModuleNotFoundError as error:
-    # Keep the Streamlit interface available so it can show a useful setup error.
     sync_playwright = None
     PlaywrightError = Exception
     PlaywrightTimeoutError = TimeoutError
@@ -27,6 +26,12 @@ DEFAULT_HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
 }
 
+# Игнорируемые расширения статичных файлов
+MEDIA_EXTENSIONS_PATTERN = re.compile(
+    r"\.(?:pdf|jpg|jpeg|png|gif|svg|webp|avif|mp4|webm|avi|mov|mp3|zip|rar|tar|gz|css|js|woff|woff2|ttf|eot)(?:$|\?)",
+    re.IGNORECASE,
+)
+
 
 def normalize_url(value: str) -> str:
     value = value.strip()
@@ -36,10 +41,16 @@ def normalize_url(value: str) -> str:
         value = "https://" + value
     value, _ = urldefrag(value)
     parsed = urlsplit(value)
+
+    # Фильтруем UTM-метки, счетчики и параметры сортировки каталога для избежания циклов
+    ignored_params = (
+        "utm_", "fbclid", "gclid", "yclid", "_openstat",
+        "sort", "order", "orderby", "dir", "limit", "view"
+    )
     query = [
         (key, item)
         for key, item in parse_qsl(parsed.query, keep_blank_values=True)
-        if not key.casefold().startswith(("utm_", "fbclid", "gclid", "yclid"))
+        if not key.casefold().startswith(ignored_params)
     ]
     value = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
     return value.rstrip("/") or value
@@ -87,11 +98,14 @@ def _internal_links(page, base_url: str, selector: str = "a[href]") -> list[str]
     result: list[str] = []
     seen: set[str] = set()
     for raw_url in links:
-        url = normalize_url(urljoin(base_url, str(raw_url)))
+        raw_str = str(raw_url).strip()
+        if raw_str.startswith(("javascript:", "tel:", "mailto:")):
+            continue
+        url = normalize_url(urljoin(base_url, raw_str))
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not _same_domain(url, base_url):
             continue
-        if re.search(r"\.(?:pdf|jpg|jpeg|png|gif|svg|webp|mp4|mp3|zip|rar)(?:$|\?)", parsed.path, re.IGNORECASE):
+        if MEDIA_EXTENSIONS_PATTERN.search(parsed.path):
             continue
         if url in seen:
             continue
@@ -115,13 +129,13 @@ def _expand_dynamic_content(page) -> None:
     for selector in selectors:
         try:
             locator = page.locator(selector)
-            count = min(locator.count(), 80)
+            count = min(locator.count(), 40)
             for index in range(count):
                 try:
                     item = locator.nth(index)
-                    if item.is_visible(timeout=250):
-                        item.click(timeout=900, force=True)
-                        page.wait_for_timeout(100)
+                    if item.is_visible(timeout=200):
+                        item.click(timeout=600, force=True)
+                        page.wait_for_timeout(80)
                 except (PlaywrightError, PlaywrightTimeoutError):
                     continue
         except (PlaywrightError, PlaywrightTimeoutError):
@@ -130,10 +144,10 @@ def _expand_dynamic_content(page) -> None:
 
 def _scroll_to_end(page) -> None:
     last_height = 0
-    for _ in range(12):
+    for _ in range(8):
         height = page.evaluate("document.documentElement.scrollHeight")
         page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
-        page.wait_for_timeout(350)
+        page.wait_for_timeout(300)
         new_height = page.evaluate("document.documentElement.scrollHeight")
         if new_height == last_height or new_height == height:
             break
@@ -142,16 +156,38 @@ def _scroll_to_end(page) -> None:
 
 
 def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
-    page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT)
-    page.wait_for_timeout(800)
+    response = page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT)
+    page.wait_for_timeout(600)
+
+    # НЮАНС №3: Фильтрация битых страниц (404, 500 и т.д.)
+    if response and response.status >= 400:
+        return {
+            "url": url,
+            "depth": depth,
+            "title": "",
+            "description": "",
+            "text": "",
+            "attributes": "",
+            "site_terms": [],
+            "model_terms": [],
+            "issues": [],
+            "error": f"HTTP {response.status} ({response.status_text})",
+            "links": [],
+            "nav_links": [],
+        }
+
     if expand_dynamic:
         _expand_dynamic_content(page)
     _scroll_to_end(page)
-    if expand_dynamic:
-        _expand_dynamic_content(page)
-        _scroll_to_end(page)
+
+    # НЮАНС №1: Удаляем мусорные теги из DOM перед чтением текста
+    page.evaluate("""() => {
+        const removeSelectors = ['script', 'style', 'noscript', 'svg', 'template', 'iframe'];
+        document.querySelectorAll(removeSelectors.join(',')).forEach(el => el.remove());
+    }""")
 
     text = page.locator("body").inner_text(timeout=5_000)
+
     attributes = page.eval_on_selector_all(
         "[alt], [title], [placeholder], [aria-label]",
         """
@@ -172,11 +208,7 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
         ).trim()).filter(Boolean).slice(0, 50)
         """,
     )
-    model_selector = (
-        "h1, [itemprop='name'], [class*='model'], [id*='model'], [class*='sku'], [class*='product-name']"
-        if _looks_like_product_url(url)
-        else "[itemprop='name'], [class*='model'], [id*='model'], [class*='sku'], [class*='product-name']"
-    )
+    model_selector = "h1, [itemprop='name'], [class*='model'], [id*='model'], [class*='sku'], [class*='product-name']"
     model_terms = page.eval_on_selector_all(
         model_selector,
         """
@@ -187,6 +219,7 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
     )
     title = page.title()
     description = page.locator("meta[name='description']").get_attribute("content") or ""
+
     return {
         "url": url,
         "depth": depth,
@@ -204,7 +237,6 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
 
 
 def _install_browser_if_needed() -> None:
-    """Streamlit Community Cloud may not have the Playwright browser cache yet."""
     if sync_playwright is None:
         raise RuntimeError(
             "Не установлен Playwright. Добавьте requirements.txt в корень GitHub-репозитория "
@@ -233,7 +265,6 @@ def crawl_site(
     progress=None,
     status=None,
 ) -> list[dict]:
-    """Breadth-first crawl of one domain, returning one result per visited page."""
     start_url = normalize_url(start_url)
     if not start_url:
         raise ValueError("Не указана ссылка на сайт")
@@ -251,6 +282,7 @@ def crawl_site(
         start_kind = "catalog" if _looks_like_catalog_url(start_url) else "home"
     if not smart_mode:
         start_kind = "generic"
+
     queue = deque([(start_url, 0, start_kind)])
     queued = {start_url}
     results: list[dict] = []
@@ -290,6 +322,7 @@ def crawl_site(
                     status(f"Проверяется страница {len(results) + 1} из {total_label}: {url}")
                 if progress and max_pages is not None:
                     progress(len(results) / max_pages)
+
                 try:
                     result = _collect_page(page, url, depth, expand_dynamic)
                 except Exception as error:
@@ -307,12 +340,16 @@ def crawl_site(
                         "links": [],
                         "nav_links": [],
                     }
+
                 results.append(result)
+
+                # Не ищем дочерние ссылки на страницах с ошибками
+                if result.get("error"):
+                    continue
+
                 if smart_mode:
                     next_depth = depth + 1
                     if kind == "home":
-                        # From the homepage follow only links a visitor can reach
-                        # in the header/navigation/footer, plus visible catalog links.
                         for link in result.get("nav_links", []):
                             if _looks_like_catalog_url(link):
                                 enqueue(link, next_depth, "catalog")
@@ -322,8 +359,6 @@ def crawl_site(
                             if _looks_like_catalog_url(link):
                                 enqueue(link, next_depth, "catalog")
                     elif kind == "nav":
-                        # A header/footer page can lead to another catalog section,
-                        # but its body links are not recursively crawled.
                         for link in result.get("nav_links", []):
                             if _looks_like_catalog_url(link):
                                 enqueue(link, next_depth, "catalog")
@@ -349,11 +384,13 @@ def crawl_site(
                                 continue
                             product_links_seen += 1
                         enqueue(link, depth + 1, "generic")
+
                 if progress and max_pages is not None:
                     progress(len(results) / max_pages)
         finally:
             context.close()
             browser.close()
+
     if results:
         results[0]["_limit_reached"] = limit_reached
     if status:
