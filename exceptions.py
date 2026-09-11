@@ -1,7 +1,7 @@
 """Built-in whitelist for brands, formats, abbreviations and identifiers."""
 
 BASE_EXCEPTIONS = {
-    # Common brands and product names.
+    # Бренды и производители
     "gorenje", "bosch", "samsung", "lg", "apple", "philips", "siemens",
     "haier", "beko", "miele", "electrolux", "aeg", "xiaomi", "google",
     "sony", "panasonic", "toshiba", "asus", "lenovo", "hp", "huawei",
@@ -9,28 +9,38 @@ BASE_EXCEPTIONS = {
     "braun", "nespresso", "dolce gusto", "airpods", "iphone", "ipad",
     "simplicity", "ora-ito", "karim rashid",
 
-    # File formats and technical extensions.
-    "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "mp4", "mp3", "avi", "mov", "webm",
+    # Форматы файлов и медиа-расширения
+    "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "ico",
+    "mp4", "mp3", "avi", "mov", "webm", "mkv", "flv",
     "pdf", "doc", "docx", "xls", "xlsx", "zip", "rar", "csv", "json", "xml",
+    "css", "js", "woff", "woff2", "ttf", "eot",
+
+    # Технические протоколы, разъемы и стандарты
     "url", "http", "https", "api", "id", "qr", "pin", "sim", "usb", "type-c", "micro-usb",
-    "hdmi", "led", "oled", "qled", "hd", "full hd", "4k", "8k", "wi-fi", "bluetooth",
-    "nfc", "gps", "rgb", "cmyk", "css", "html", "seo", "faq", "vip",
+    "hdmi", "vga", "dvi", "displayport", "lan", "aux",
+    "led", "oled", "qled", "hd", "full hd", "4k", "8k", "wi-fi", "bluetooth",
+    "nfc", "gps", "rgb", "cmyk", "html", "seo", "faq", "vip",
     "top", "new", "sale", "ok", "datamatrix", "gtin", "sscc", "gln",
     "ооо", "ип", "инн", "огрн",
 
-    # Technical specifications, units, standards.
-    "kwh", "w", "kw", "v", "a", "ma", "hz", "khz", "mhz", "ghz", "db", "rpm",
-    "bar", "pa", "din", "ip20", "ip44", "ip65", "ip68", "iso", "ce",
+    # Единицы измерений и физические величины
+    "kwh", "w", "kw", "v", "a", "ma", "hz", "khz", "mhz", "ghz",
+    "db", "rpm", "bar", "pa", "kpa", "btu", "din",
+    "kg", "g", "mg", "l", "ml", "mm", "cm", "m",
+    "ip20", "ip44", "ip65", "ip68", "iso", "ce",
+
+    # Доменные зоны
     "com", "ru", "net", "org", "info", "by", "kz", "рф",
 
-    # Social networks and messengers.
+    # Социальные сети и мессенджеры
     "instagram", "youtube", "facebook", "telegram", "whatsapp", "viber", "tiktok", "vk",
 
-    # Payment and operating systems.
-    "visa", "mastercard", "mir", "paypal", "android", "ios", "windows", "macos",
+    # Платежные и операционные системы
+    "visa", "mastercard", "mir", "paypal", "android", "ios", "windows", "macos", "linux",
 
-    # Common appliance / UI modes left in Latin script.
+    # Характеристики бытовой техники и элементы интерфейса
     "tv", "smart", "eco", "inverter", "wifi", "no frost", "total no frost",
     "hi-light", "aqua stop", "aquastop", "touch control", "soft close",
+    "child lock", "super cool", "super freeze", "fast freeze",
     "online", "outlet", "premium", "alt", "title", "recaptcha",
 }
