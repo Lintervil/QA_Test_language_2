@@ -1,4 +1,4 @@
-"""Playwright crawler with deep category-to-product traversal and balanced quotas."""
+"""Playwright crawler with deep category-to-product traversal, quota balancing, and memory safety."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ except ModuleNotFoundError as error:
     PlaywrightTimeoutError = TimeoutError
     PLAYWRIGHT_IMPORT_ERROR = str(error)
 
-NAVIGATION_TIMEOUT = 35_000
+NAVIGATION_TIMEOUT = 30_000
 DEFAULT_HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
 }
@@ -32,11 +32,24 @@ MEDIA_EXTENSIONS_PATTERN = re.compile(
 
 
 def normalize_url(value: str) -> str:
+    """Очищает URL от меток и отсекает почту, телефоны и мусорные адреса."""
     value = value.strip()
     if not value:
         return ""
+
+    lower_val = value.casefold()
+
+    # Игнорируем почту, телефоны, javascript и мессенджеры ДО любой обработки
+    if lower_val.startswith(("mailto:", "tel:", "javascript:", "data:", "whatsapp:", "viber:", "tg:")):
+        return ""
+
+    # Отсекаем адреса с собачкой @ (попытки парсить mailto как веб-ссылку)
+    if "@" in value:
+        return ""
+
     if not re.match(r"^https?://", value, re.IGNORECASE):
         value = "https://" + value
+
     value, _ = urldefrag(value)
     parsed = urlsplit(value)
 
@@ -76,19 +89,17 @@ def _looks_like_catalog_url(url: str) -> bool:
 
 
 def classify_url(url: str) -> str:
-    """Определяет роль страницы: главная, товар, каталог, статьи или инфо."""
+    """Определяет тип страницы для балансировки очереди."""
     path = (urlparse(url).path or "").strip("/").casefold()
     if not path:
         return "home"
     if _looks_like_product_url(url):
         return "product"
 
-    # Новости, промо-акции и статьи
     article_markers = ("news", "articles", "article", "blog", "stati", "novosti", "obzory", "promo", "actions", "action", "sale", "skidki", "akcii")
     if any(marker in path.split("/") for marker in article_markers):
         return "article"
 
-    # Служебные инфо-разделы
     info_markers = ("about", "contacts", "delivery", "payment", "warranty", "service", "dostavka", "oplata", "garantiya", "servis", "policy", "privacy")
     if any(marker in path.split("/") for marker in info_markers):
         return "info"
@@ -106,7 +117,6 @@ NAV_LINK_SELECTOR = (
 
 
 def _internal_links(page, base_url: str, selector: str = "a[href]", allow_hidden: bool = False) -> list[str]:
-    # allow_hidden=True позволяет доставать подкатегории из выпадающих шторок меню
     js_code = f"""
     elements => elements.filter(element => {{
         if ({str(allow_hidden).lower()}) return true;
@@ -118,11 +128,19 @@ def _internal_links(page, base_url: str, selector: str = "a[href]", allow_hidden
     links = page.eval_on_selector_all(selector, js_code)
     result: list[str] = []
     seen: set[str] = set()
+
     for raw_url in links:
         raw_str = str(raw_url).strip()
-        if raw_str.startswith(("javascript:", "tel:", "mailto:")):
+        lower_str = raw_str.casefold()
+
+        # Отсекаем почту и телефоны на уровне поиска тегов
+        if lower_str.startswith(("javascript:", "tel:", "mailto:", "data:", "whatsapp:", "tg:")) or "@" in raw_str:
             continue
+
         url = normalize_url(urljoin(base_url, raw_str))
+        if not url:
+            continue
+
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not _same_domain(url, base_url):
             continue
@@ -130,8 +148,10 @@ def _internal_links(page, base_url: str, selector: str = "a[href]", allow_hidden
             continue
         if url in seen:
             continue
+
         seen.add(url)
         result.append(url)
+
     return result
 
 
@@ -148,13 +168,13 @@ def _expand_dynamic_content(page) -> None:
     for selector in selectors:
         try:
             locator = page.locator(selector)
-            count = min(locator.count(), 30)
+            count = min(locator.count(), 20)
             for index in range(count):
                 try:
                     item = locator.nth(index)
-                    if item.is_visible(timeout=150):
-                        item.click(timeout=500, force=True)
-                        page.wait_for_timeout(60)
+                    if item.is_visible(timeout=120):
+                        item.click(timeout=400, force=True)
+                        page.wait_for_timeout(50)
                 except (PlaywrightError, PlaywrightTimeoutError):
                     continue
         except (PlaywrightError, PlaywrightTimeoutError):
@@ -163,10 +183,10 @@ def _expand_dynamic_content(page) -> None:
 
 def _scroll_to_end(page) -> None:
     last_height = 0
-    for _ in range(6):
+    for _ in range(5):
         height = page.evaluate("document.documentElement.scrollHeight")
         page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
-        page.wait_for_timeout(250)
+        page.wait_for_timeout(200)
         new_height = page.evaluate("document.documentElement.scrollHeight")
         if new_height == last_height or new_height == height:
             break
@@ -176,9 +196,9 @@ def _scroll_to_end(page) -> None:
 
 def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
     response = page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT)
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(400)
 
-    # Игнорируем страницы 404, 500 и прочие системные сбои
+    # Игнорируем страницы 404, 500 и битые ссылки
     if response and response.status >= 400:
         return {
             "url": url, "depth": depth, "title": "", "description": "",
@@ -191,7 +211,7 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
         _expand_dynamic_content(page)
     _scroll_to_end(page)
 
-    # Очищаем DOM от скриптов, стилей и SVG перед извлечением текста
+    # Удаляем служебные теги DOM перед извлечением текста
     page.evaluate("""() => {
         const remove = ['script', 'style', 'noscript', 'svg', 'iframe', 'template'];
         document.querySelectorAll(remove.join(',')).forEach(el => el.remove());
@@ -269,7 +289,7 @@ def crawl_site(
     total_limit = max_pages or 100
     product_sample = max(1, min(int(product_sample), 5))
 
-    # Сбалансированные квоты для распределения типов страниц
+    # Сбалансированные лимиты по категориям
     LIMIT_CATALOG = int(total_limit * 0.35)   # До 35% категорий и подкатегорий
     LIMIT_PRODUCT = int(total_limit * 0.45)   # До 45% товаров
     LIMIT_CONTENT = total_limit - (LIMIT_CATALOG + LIMIT_PRODUCT)  # Остаток под статьи, акции и инфо
@@ -284,13 +304,28 @@ def crawl_site(
 
     _install_browser_if_needed()
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--no-sandbox"])
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--js-flags=--max-old-space-size=512",
+            ],
+        )
         context = browser.new_context(
             viewport={"width": 1440, "height": 900},
             locale="ru-RU",
             extra_http_headers=DEFAULT_HEADERS,
             ignore_https_errors=True,
         )
+
+        # Оптимизация памяти: блокируем загрузку тяжелых медиафайлов
+        context.route(
+            "**/*.{png,jpg,jpeg,webp,gif,svg,mp4,webm,avi,woff,woff2,ttf,eot}",
+            lambda route: route.abort(),
+        )
+
         page = context.new_page()
         page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
 
@@ -323,7 +358,7 @@ def crawl_site(
                 nav_links = result.get("nav_links", [])
 
                 if kind == "home":
-                    # С главной сразу забираем инфо-разделы и акции из навигации
+                    # С главной берем инфо-разделы и акции из навигации
                     for link in nav_links:
                         c_type = classify_url(link)
                         if c_type in {"info", "article"} and counts["content"] < LIMIT_CONTENT and link not in enqueued:
@@ -331,7 +366,7 @@ def crawl_site(
                             counts["content"] += 1
                             queue.append((link, depth + 1, c_type))
 
-                    # Забираем основные категории каталога
+                    # Берем основные категории каталога
                     for link in nav_links + links:
                         if classify_url(link) == "catalog" and counts["catalog"] < LIMIT_CATALOG and link not in enqueued:
                             enqueued.add(link)
@@ -341,7 +376,7 @@ def crawl_site(
                 elif kind == "catalog":
                     # 1. Если внутри раздела есть подкатегории (Встраиваемые, Компактные и т.д.)
                     subcats = [l for l in links if classify_url(l) == "catalog" and l not in enqueued]
-                    for sub in subcats[:3]:  # Берем до 3 подкатегорий
+                    for sub in subcats[:3]:
                         if counts["catalog"] < LIMIT_CATALOG:
                             enqueued.add(sub)
                             counts["catalog"] += 1
@@ -356,7 +391,6 @@ def crawl_site(
                             queue.appendleft((prod, depth + 1, "product"))
 
                 elif kind in {"info", "article"}:
-                    # Из общих разделов статей берем отдельные статьи/акции
                     for link in links:
                         c_type = classify_url(link)
                         if c_type in {"info", "article"} and counts["content"] < LIMIT_CONTENT and link not in enqueued:
