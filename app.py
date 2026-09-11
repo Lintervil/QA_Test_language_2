@@ -1,20 +1,19 @@
+"""Streamlit interface for website language and translation QA."""
+
 from __future__ import annotations
 
-import hashlib
-import html
-import io
+from datetime import datetime
 from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
 
 from checker import automatic_exceptions, check_page, top_words
-from crawler import crawl_site, normalize_url
-
+from crawler import crawl_site
 
 st.set_page_config(
-    page_title="Перевод QA",
-    page_icon="🔎",
+    page_title="Проверка качества перевода сайтов",
+    page_icon="🌐",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -26,39 +25,29 @@ st.markdown(
     .stApp { background: #0c1015; color: #e8edf2; }
     [data-testid="stHeader"] { background: #0c1015; }
     [data-testid="stSidebar"] { background: #121820; border-right: 1px solid #273240; }
-    .block-container { max-width: 1480px; padding-top: 2.4rem; }
-    h1, h2, h3 { color: #f5f7fa !important; letter-spacing: -0.025em; }
-    .eyebrow { color: #8fa2b5; font-size: .76rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
-    .lede { color: #a4b1bf; font-size: 1.04rem; max-width: 850px; margin-bottom: 1.5rem; }
-    .metric-card { background: #121820; border: 1px solid #273240; border-radius: 10px; padding: 15px 18px; min-height: 84px; }
-    .metric-label { color: #8fa2b5; font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; }
-    .metric-value { color: #f5f7fa; font-size: 1.8rem; font-weight: 760; margin-top: 5px; }
-    .issue-card { background: #171d25; border: 1px solid #34404e; border-left: 3px solid #ff6259; border-radius: 8px; padding: 12px 15px; margin: 7px 0; }
-    .issue-word { color: #ff9d96; font-size: 1.05rem; font-weight: 750; }
-    .issue-meta { color: #a4b1bf; font-size: .84rem; margin-top: 4px; }
-    .status-ok { color: #58d68d; font-weight: 700; }
-    .status-error { color: #ff8179; font-weight: 700; }
-    .source-pill { color: #a4b1bf; border: 1px solid #34404e; border-radius: 99px; padding: 3px 9px; font-size: .76rem; }
-    div[data-testid="stExpander"] { border: 1px solid #273240; border-radius: 10px; background: #121820; }
-    div[data-testid="stCode"] { border: 1px solid #34404e; border-radius: 7px; }
+    .block-container { max-width: 1400px; padding-top: 1.6rem; padding-bottom: 3rem; }
+    h1, h2, h3 { color: #f5f7fa !important; }
+    .badge-clean { background: #1b472e; color: #58d68d; padding: 4px 10px; border-radius: 6px; font-weight: 700; }
+    .badge-error { background: #4d1c1a; color: #ff8179; padding: 4px 10px; border-radius: 6px; font-weight: 700; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-def _safe(value: str) -> str:
-    return html.escape(str(value or ""), quote=True)
-
-
 def _issue_rows(pages: list[dict]) -> list[dict[str, str]]:
     rows = []
     for page_number, page in enumerate(pages, 1):
+        url = page.get("url", "")
+        # ЗАЩИТА: Исключаем mailto и служебные протоколы из отчета
+        if "mailto:" in url.casefold() or "@" in url:
+            continue
+
         for issue in page.get("issues", []):
             rows.append(
                 {
                     "Страница": page_number,
-                    "URL": page["url"],
+                    "URL": url,
                     "Слово или фраза": issue["word"],
                     "Контекст": issue["context"],
                     "Источник": issue["source"],
@@ -67,253 +56,122 @@ def _issue_rows(pages: list[dict]) -> list[dict[str, str]]:
     return rows
 
 
-def _recheck_pages(pages: list[dict], custom_exceptions: str, automatic_whitelist: set[str], ignored_words: set[str]) -> None:
-    combined = set(automatic_whitelist) | set(ignored_words)
-    for page in pages:
-        page["issues"] = check_page(page, custom_exceptions, combined)
-
-
-def _ignore_word_key(word: str) -> str:
-    digest = hashlib.sha1(word.casefold().encode("utf-8")).hexdigest()[:12]
-    return f"ignore-word-{digest}"
-
-
-def _show_frequent_word_controls(pages: list[dict]) -> None:
-    counts = dict(top_words(pages))
-    ignored = set(st.session_state.get("ignored_words", set()))
-    words = sorted(set(counts) | ignored)
-    if not words:
-        return
-
-    st.markdown("### Исключения из текущего отчёта")
-    st.caption("Поставьте галочку рядом со словом, которое является брендом, моделью или постоянным термином. Оно сразу исчезнет из ошибок.")
-    columns = st.columns(2)
-    selected: set[str] = set()
-    for index, word in enumerate(words):
-        count = counts.get(word)
-        label = f"{word} · {count} раз" if count is not None else f"{word} · исключено"
-        with columns[index % 2]:
-            if st.checkbox(label, value=word in ignored, key=_ignore_word_key(word)):
-                selected.add(word)
-
-    if selected != ignored:
-        st.session_state["ignored_words"] = selected
-        _recheck_pages(
-            pages,
-            st.session_state.get("custom_exceptions", ""),
-            set(st.session_state.get("automatic_whitelist", set())),
-            selected,
-        )
-
-def _show_page(page_number: int, page: dict) -> None:
+def _show_page(index: int, page: dict) -> None:
     issues = page.get("issues", [])
-    crawl_error = page.get("error", "")
-    label = f"❌ Страница {page_number}: {page['url']} · найдено слов: {len(issues)}" if issues else f"✅ Страница {page_number}: {page['url']} · слов: 0"
-    with st.expander(label, expanded=bool(issues or crawl_error)):
-        st.markdown(
-            f"<a href='{_safe(page['url'])}' target='_blank' rel='noopener'>Открыть оригинальную страницу в новой вкладке ↗</a>",
-            unsafe_allow_html=True,
-        )
-        if crawl_error:
-            st.error(f"Страница не загрузилась: {crawl_error}")
+    title = page.get("title", "").strip() or "Без заголовка"
+    url = page.get("url", "")
+
+    label = f"#{index} {url} — {len(issues)} нарушений" if issues else f"#{index} {url} — чисто"
+    with st.expander(label):
+        st.caption(f"Title: {title}")
+        if page.get("error"):
+            st.error(f"Ошибка загрузки: {page['error']}")
             return
 
         if issues:
-            st.markdown("#### Найденные нарушения")
-            for issue in issues:
-                st.markdown(
-                    f"<div class='issue-card'><div class='issue-word'>{_safe(issue['word'])}</div>"
-                    f"<div class='issue-meta'>{_safe(issue['context'])}</div>"
-                    f"<div class='issue-meta'><span class='source-pill'>{_safe(issue['source'])}</span> "
-                    "</div></div>",
-                    unsafe_allow_html=True,
-                )
-                st.caption("Задача для контент-менеджера · кнопка копирования встроена в блок")
-                st.code(
-                    f"Страница: {page['url']}\n- {issue['word']} — «{issue['context']}»",
-                    language=None,
-                )
+            df_page = pd.DataFrame(issues)
+            df_page.columns = ["Слово/фраза", "Контекст", "Источник"]
+            st.dataframe(df_page, use_container_width=True, hide_index=True)
         else:
-            st.markdown("<div class='status-ok'>Непереведённый английский текст не найден.</div>", unsafe_allow_html=True)
+            st.markdown("<span class='badge-clean'>Нарушений перевода не найдено</span>", unsafe_allow_html=True)
 
 
-st.markdown("<div class='eyebrow'>Translation QA / Russian websites</div>", unsafe_allow_html=True)
-st.title("Проверка качества перевода сайтов")
-st.markdown(
-    "<div class='lede'>Откройте русскоязычный сайт настоящим браузером, проверьте видимый текст и подписи интерфейса, а затем получите готовый отчёт для контент-менеджера.</div>",
-    unsafe_allow_html=True,
-)
-
+# --- САЙДБАР ---
 with st.sidebar:
-    st.markdown("### Параметры проверки")
-    site_url = st.text_input(
-        "URL сайта",
-        value=st.session_state.get("site_url", "https://gorenje-ru.ru/"),
-        placeholder="https://example.ru/",
-        help="Проверяются только ссылки на том же домене.",
+    st.title("Параметры проверки")
+    start_url = st.text_input("URL сайта", value="https://miele-store.ru/")
+
+    crawl_mode = st.radio(
+        "Какие страницы проверять",
+        ["🧭 Навигация — путь пользователя", "Все ссылки"],
+        index=0,
     )
-    scan_entire_site = st.checkbox(
-        "Глубокий обход: главная → навигация → каталог",
-        value=True,
-        help="Проверяет главную, видимые ссылки из шапки/навигации/футера, разделы каталога и несколько карточек товаров в каждом разделе.",
-    )
-    depth = st.number_input(
-        "Глубина обхода",
-        min_value=0,
-        max_value=3,
-        value=3,
-        step=1,
-        disabled=scan_entire_site,
-        help="0 — только указанная страница, 1 — ещё один переход по внутренним ссылкам.",
-    )
-    max_pages = st.number_input(
-        "Лимит страниц",
-        min_value=1,
-        max_value=500,
-        value=100,
-        step=10,
-        help="Защитный предел по умолчанию — 100 страниц, чтобы сайт не ушёл в бесконечный обход.",
-    )
-    unlimited_pages = st.checkbox(
-        "Снять защитный лимит страниц",
-        value=False,
-        help="Отключает предел полностью. Используйте только если уверены, что на сайте нет бесконечных фильтров и календарей.",
-    )
-    product_sample = st.number_input(
-        "Карточек товара на раздел",
-        min_value=1,
-        max_value=10,
-        value=3,
-        step=1,
-        help="Из каждой страницы каталога проверяется несколько карточек, а не все товары.",
-    )
+    max_depth = st.number_input("Глубина обхода", min_value=1, max_value=5, value=3)
+    max_pages = st.number_input("Лимит страниц", min_value=10, max_value=300, value=100, step=10)
+    product_sample = st.number_input("Карточек товара на раздел", min_value=1, max_value=5, value=2)
+
     custom_exceptions = st.text_area(
         "Свои слова и модели-исключения",
-        value=st.session_state.get("custom_exceptions", ""),
-        height=130,
-        placeholder="Например:\nBrandName\nвнутренний термин",
-        help="Одно слово на строку, либо через запятую. Сохраняется в текущей сессии приложения.",
+        value="",
+        placeholder="Слова через запятую или с новой строки",
+        height=100,
     )
-    ignore_site_names = st.checkbox(
-        "Автоматически исключать название сайта, бренды и модели",
-        value=True,
-        help="Белый список собирается из домена, логотипа и названий товаров в H1. Отключите для максимально строгой проверки.",
-    )
-    expand_dynamic = st.checkbox(
-        "Раскрывать динамический контент",
-        value=True,
-        help="Прокрутка lazy-load, меню, аккордеоны, табы и стрелки каруселей.",
-    )
-    run = st.button("Запустить проверку", type="primary", use_container_width=True)
-    if st.button("Очистить результаты", use_container_width=True):
-        st.session_state.pop("pages", None)
+
+    col1, col2 = st.columns(2)
+    start_btn = col1.button("Старт", type="primary", use_container_width=True)
+    clear_btn = col2.button("Очистить", use_container_width=True)
+
+    if clear_btn:
+        st.session_state.clear()
         st.rerun()
-    st.divider()
-    st.caption("Для страниц каталога проверяются несколько карточек товара, чтобы не тратить время на одинаковые шаблоны.")
 
+# --- ОСНОВНАЯ ЧАСТЬ ---
+st.title("Проверка качества перевода сайтов")
 
-if run:
-    normalized = normalize_url(site_url)
-    parsed = urlparse(normalized)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        st.error("Введите корректный URL, например https://example.ru/")
-    else:
-        st.session_state["site_url"] = site_url
-        st.session_state["custom_exceptions"] = custom_exceptions
-        progress = st.progress(0)
-        status = st.empty()
-        try:
-            pages = crawl_site(
-                normalized,
-                max_depth=None if scan_entire_site else int(depth),
-                max_pages=None if unlimited_pages else int(max_pages),
-                product_sample=int(product_sample),
-                expand_dynamic=expand_dynamic,
-                smart_mode=True,
-                progress=progress.progress,
-                status=status.info,
-            )
-            automatic_whitelist = automatic_exceptions(normalized, pages) if ignore_site_names else set()
-            st.session_state["ignored_words"] = set()
-            st.session_state["automatic_whitelist"] = automatic_whitelist
-            for key in list(st.session_state):
-                if key.startswith("ignore-word-"):
-                    del st.session_state[key]
-            for page in pages:
-                page["issues"] = check_page(page, custom_exceptions, automatic_whitelist)
-            st.session_state["automatic_whitelist_count"] = len(automatic_whitelist)
-            st.session_state["pages"] = pages
-            st.session_state["crawl_limit_reached"] = bool(pages and pages[0].get("_limit_reached"))
-            progress.progress(1.0)
-            if st.session_state["crawl_limit_reached"]:
-                status.warning(f"Проверка остановлена на защитном лимите: {len(pages)} страниц")
-            else:
-                status.success(f"Проверка завершена: {len(pages)} страниц")
-        except Exception as error:
-            st.error(f"Не удалось запустить проверку: {error}")
+if start_btn and start_url:
+    status_box = st.empty()
+    progress_bar = st.progress(0)
 
+    try:
+        pages = crawl_site(
+            start_url=start_url,
+            max_depth=max_depth,
+            max_pages=max_pages,
+            product_sample=product_sample,
+            expand_dynamic=True,
+            smart_mode=(crawl_mode == "🧭 Навигация — путь пользователя"),
+            progress=progress_bar.progress,
+            status=status_box.info,
+        )
 
-pages = st.session_state.get("pages")
-if pages is None:
-    st.info("Укажите сайт слева и нажмите «Запустить проверку».")
-else:
-    _show_frequent_word_controls(pages)
-    issue_count = sum(len(page.get("issues", [])) for page in pages)
-    error_pages = sum(bool(page.get("issues")) for page in pages)
-    failed_pages = sum(bool(page.get("error")) for page in pages)
-    metrics = st.columns(4)
-    for column, label, value in zip(
-        metrics,
-        ["Проверено страниц", "Страниц с нарушениями", "Найдено слов", "Ошибок загрузки"],
-        [len(pages), error_pages, issue_count, failed_pages],
-    ):
-        with column:
-            st.markdown(
-                f"<div class='metric-card'><div class='metric-label'>{label}</div><div class='metric-value'>{value}</div></div>",
-                unsafe_allow_html=True,
-            )
+        status_box.info("Анализ контента страниц...")
+        auto_whitelist = automatic_exceptions(start_url, pages)
 
-    st.markdown("### Частые нарушения")
-    automatic_count = st.session_state.get("automatic_whitelist_count", 0)
-    if automatic_count:
-        st.caption(f"Автоматически исключено названий сайта и моделей: {automatic_count}")
-    frequent = top_words(pages)
-    if frequent:
-        st.dataframe(
-            pd.DataFrame(frequent, columns=["Слово или фраза", "Количество"]),
-            hide_index=True,
+        for p in pages:
+            p["issues"] = check_page(p, custom_exceptions, auto_whitelist)
+
+        st.session_state["pages"] = pages
+        status_box.success(f"Проверено {len(pages)} страниц.")
+    except Exception as e:
+        status_box.error(f"Ошибка выполнения: {e}")
+
+if "pages" in st.session_state:
+    pages = st.session_state["pages"]
+    valid_pages = [p for p in pages if "mailto:" not in p.get("url", "").casefold() and "@" not in p.get("url", "")]
+
+    total_issues = sum(len(p.get("issues", [])) for p in valid_pages)
+    pages_with_issues = sum(1 for p in valid_pages if p.get("issues"))
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Всего страниц", len(valid_pages))
+    m2.metric("Страниц с нарушениями", pages_with_issues)
+    m3.metric("Всего нарушений", total_issues)
+
+    rows = _issue_rows(valid_pages)
+    if rows:
+        st.subheader("Сводная таблица нарушений")
+        df_export = pd.DataFrame(rows)
+        st.dataframe(df_export, use_container_width=True, hide_index=True)
+
+        csv_data = df_export.to_csv(index=False).encode("utf-8-sig")
+        timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M")
+        domain = urlparse(start_url).hostname or "site"
+        st.download_button(
+            "📥 Скачать отчет CSV",
+            csv_data,
+            f"{timestamp}_{domain}_export.csv",
+            "text/csv",
             use_container_width=True,
         )
-    else:
-        st.success("Непереведённого английского текста не найдено.")
 
-    st.markdown("### Отчёт по страницам")
-    rows = _issue_rows(pages)
-    if rows:
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    else:
-        st.info("Таблица нарушений пуста: английские слова вне белого списка не найдены.")
-    filter_text = st.text_input("Фильтр по URL или найденному слову", placeholder="Например: catalog или collection")
-    only_problems = st.checkbox("Показывать только страницы с нарушениями")
-    for index, page in enumerate(pages, 1):
-        searchable = page["url"] + " " + " ".join(issue["word"] for issue in page.get("issues", []))
-        if filter_text and filter_text.casefold() not in searchable.casefold():
+    st.subheader("Список страниц")
+    only_problems = st.checkbox("Показывать только страницы с ошибками", value=True)
+    filter_word = st.text_input("Поиск по URL или слову", value="")
+
+    for idx, p in enumerate(valid_pages, 1):
+        if only_problems and not p.get("issues"):
             continue
-        if only_problems and not page.get("issues"):
+        search_blob = p["url"] + " " + " ".join(i["word"] for i in p.get("issues", []))
+        if filter_word and filter_word.casefold() not in search_blob.casefold():
             continue
-        _show_page(index, page)
-
-    csv_data = pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig")
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-        pd.DataFrame(rows).to_excel(writer, index=False, sheet_name="Нарушения")
-        pd.DataFrame(
-            [{"URL": page["url"], "Глубина": page["depth"], "Найдено слов": len(page.get("issues", [])), "Ошибка загрузки": page.get("error", "")} for page in pages]
-        ).to_excel(writer, index=False, sheet_name="Страницы")
-
-    st.markdown("### Скачать данные")
-    left, right = st.columns(2)
-    with left:
-        st.download_button("Скачать CSV", csv_data, "translation-report.csv", "text/csv")
-    with right:
-        st.download_button("Скачать Excel", excel_buffer.getvalue(), "translation-report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        _show_page(idx, p)
