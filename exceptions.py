@@ -1,10 +1,11 @@
 """Built-in whitelist for brands, formats, abbreviations and identifiers."""
 
 BASE_EXCEPTIONS = {
-    # Копирайты шаблона, сквозные элементы подвала и локации
+    # Сквозные элементы шаблона сети, подвал и юридические данные
     "kvalitet trade", "max max", "recaptcha", "design&technologies",
     "consumer electronics", "appliances", "artplay", "art play",
-    "rutube", "rutube rutube", "max max rutube rutube",
+    "rutube", "rutube rutube", "max max rutube rutube", "cookie", "cookies",
+    "email", "shop", "business", "company", "kvalitet",
 
     # Бренды и производители техники
     "gorenje", "miele", "bosch", "samsung", "lg", "apple", "philips", "siemens",
@@ -13,14 +14,17 @@ BASE_EXCEPTIONS = {
     "whirlpool", "indesit", "karcher", "tefal", "braun", "nespresso",
     "simplicity", "ora-ito", "karim rashid",
 
-    # Фирменные технологии и серии MIELE
+    # Фирменные технологии и линейки MIELE
     "directsensor", "fragrancedos", "powerdisk", "profieco", "autoopen",
     "powerflex", "airclean", "addload", "stop&go", "onetouch", "ecodry",
     "ecopower", "quickpowerwash", "capdosing", "vitroline", "aromaticsystem",
     "dynamicdrive", "easyclick", "autoclean", "easycontrol", "booster",
     "diamondfinish", "comfortclean", "brilliantlight", "twinflow",
     "comfortsize", "perfectclean", "pyrofit", "wireless food probe",
-    "foodview", "tastecontrol", "flexiclip", "hydroclean",
+    "foodview", "tastecontrol", "flexiclip", "hydroclean", "softclose",
+    "nofrost", "mtouch", "powerwash", "perfectfresh", "multisteam",
+    "monosteam", "sous-vide", "ecospeed", "artline", "profiline",
+    "con@ctivity", "con", "ctivity", "immer besser",
 
     # Фирменные технологии GORENJE / BOSCH
     "crispzone", "silvermatte", "aquaclean", "supersize", "multibox",
@@ -32,9 +36,9 @@ BASE_EXCEPTIONS = {
     "super freeze", "fast freeze", "adapttech", "dynamooling", "inverterpowerdrive",
     "ecosilence drive", "home connect", "activewater", "varioflex", "perfectdry",
 
-    # Цветовые решения и обозначения серий
+    # Цветовые решения и серии
     "pearl beige", "obsidian black", "graphite grey", "brilliant white",
-    "clean steel", "edst", "edition 125", "active",
+    "clean steel", "edst", "edition 125", "active", "gala ed", "havana brown",
 
     # Форматы файлов и медиа-расширения
     "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "ico",
@@ -66,5 +70,5 @@ BASE_EXCEPTIONS = {
     "visa", "mastercard", "mir", "paypal", "android", "ios", "windows", "macos", "linux",
 
     # Общие термины каталога
-    "tv", "smart", "eco", "inverter", "wifi", "online", "outlet", "premium", "alt", "title",
+    "tv", "smart", "eco", "inverter", "wifi", "online", "outlet", "premium", "alt", "title", "placeholder",
 }
