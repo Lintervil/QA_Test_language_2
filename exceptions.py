@@ -1,19 +1,28 @@
 """Built-in whitelist for brands, formats, abbreviations and identifiers."""
 
 BASE_EXCEPTIONS = {
-    # Копирайты шаблона и сквозные элементы подвала
+    # Копирайты шаблона, сквозные элементы подвала и локации
     "kvalitet trade", "max max", "recaptcha", "design&technologies",
-    "consumer electronics", "appliances",
+    "consumer electronics", "appliances", "artplay", "art play",
+    "rutube", "rutube rutube", "max max rutube rutube",
 
     # Бренды и производители техники
-    "gorenje", "bosch", "samsung", "lg", "apple", "philips", "siemens",
-    "haier", "beko", "miele", "electrolux", "aeg", "xiaomi", "google",
-    "sony", "panasonic", "toshiba", "asus", "lenovo", "hp", "huawei",
-    "honor", "tesla", "ikea", "whirlpool", "indesit", "karcher", "tefal",
-    "braun", "nespresso", "dolce gusto", "airpods", "iphone", "ipad",
+    "gorenje", "miele", "bosch", "samsung", "lg", "apple", "philips", "siemens",
+    "haier", "beko", "electrolux", "aeg", "xiaomi", "google", "sony",
+    "panasonic", "toshiba", "asus", "lenovo", "hp", "huawei", "honor",
+    "whirlpool", "indesit", "karcher", "tefal", "braun", "nespresso",
     "simplicity", "ora-ito", "karim rashid",
 
-    # Фирменные технологии бытовой техники (оставляются на латинице)
+    # Фирменные технологии и серии MIELE
+    "directsensor", "fragrancedos", "powerdisk", "profieco", "autoopen",
+    "powerflex", "airclean", "addload", "stop&go", "onetouch", "ecodry",
+    "ecopower", "quickpowerwash", "capdosing", "vitroline", "aromaticsystem",
+    "dynamicdrive", "easyclick", "autoclean", "easycontrol", "booster",
+    "diamondfinish", "comfortclean", "brilliantlight", "twinflow",
+    "comfortsize", "perfectclean", "pyrofit", "wireless food probe",
+    "foodview", "tastecontrol", "flexiclip", "hydroclean",
+
+    # Фирменные технологии GORENJE / BOSCH
     "crispzone", "silvermatte", "aquaclean", "supersize", "multibox",
     "ionair", "powerboost", "zerozone", "frostless", "gentleclose",
     "simpleslide", "cleanzone", "multiclack", "totalweight", "carbotech",
@@ -21,6 +30,11 @@ BASE_EXCEPTIONS = {
     "homechef", "no frost", "total no frost", "hi-light", "aqua stop",
     "aquastop", "touch control", "soft close", "child lock", "super cool",
     "super freeze", "fast freeze", "adapttech", "dynamooling", "inverterpowerdrive",
+    "ecosilence drive", "home connect", "activewater", "varioflex", "perfectdry",
+
+    # Цветовые решения и обозначения серий
+    "pearl beige", "obsidian black", "graphite grey", "brilliant white",
+    "clean steel", "edst", "edition 125", "active",
 
     # Форматы файлов и медиа-расширения
     "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "ico",
@@ -51,6 +65,6 @@ BASE_EXCEPTIONS = {
     # Платежные и операционные системы
     "visa", "mastercard", "mir", "paypal", "android", "ios", "windows", "macos", "linux",
 
-    # Общие термины интернет-магазина
+    # Общие термины каталога
     "tv", "smart", "eco", "inverter", "wifi", "online", "outlet", "premium", "alt", "title",
 }
