@@ -17,20 +17,29 @@ ENGLISH_RUN_RE = re.compile(
     r"(?![A-Za-z])"
 )
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[._/+&'-][A-Za-z0-9]+)*")
-URL_RE = re.compile(r"(?:https?://|www\.)\S+|\S+@[\w.-]+\.[A-Za-z]{2,}")
-DOMAIN_SUFFIXES = {"com", "ru", "net", "org", "info", "рф"}
+DOMAIN_SUFFIXES = {"com", "ru", "net", "org", "info", "рф", "by", "kz"}
+
+# НЮАНС №1: Расширенный список расширений статики и медиа
 FILE_SUFFIXES = {
-    "jpg", "jpeg", "png", "gif", "svg", "webp", "mp4", "mp3", "avi",
+    "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "ico",
+    "mp4", "mp3", "avi", "mov", "webm", "mkv",
     "pdf", "doc", "docx", "xls", "xlsx", "zip", "rar", "csv", "json",
+    "css", "js", "woff", "woff2", "ttf", "eot"
 }
+
 GENERIC_SITE_TERMS = {
     "www", "shop", "store", "online", "official", "site", "home", "main",
     "catalog", "ru", "com", "net", "org", "info",
 }
 
+# Регулярка для технических единиц бытовой техники (V, W, Hz, rpm, mm, cm, kg, dB и т.д.)
+TECHNICAL_UNITS_RE = re.compile(
+    r"^\d+(?:[.,]\d+)?\s*(?:v|w|kw|kwh|a|ma|hz|khz|mhz|ghz|db|rpm|kg|g|mg|l|ml|mm|cm|m|km|bar|pa|kpa|btu|din|ip\d{2})$",
+    re.IGNORECASE
+)
+
 
 def parse_exceptions(value: str | Iterable[str] | None) -> set[str]:
-    """Return a normalized set from comma/newline/semicolon separated terms."""
     if not value:
         return set()
     if isinstance(value, str):
@@ -41,7 +50,6 @@ def parse_exceptions(value: str | Iterable[str] | None) -> set[str]:
 
 
 def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
-    """Build a conservative whitelist for a site's brand and product/model names."""
     values: list[str] = []
     host = urlparse(start_url).hostname or ""
     values.extend(re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", host))
@@ -60,8 +68,6 @@ def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
                 continue
             if phrase.casefold() not in GENERIC_SITE_TERMS:
                 result.add(phrase.casefold())
-            # Keep standalone brand/model tokens useful inside mixed phrases,
-            # but do not whitelist short generic UI words automatically.
             for token in tokens:
                 if token.casefold() in GENERIC_SITE_TERMS or len(token) < 3:
                     continue
@@ -71,37 +77,85 @@ def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
 
 
 def _is_inside_translation_parentheses(text: str, start: int, end: int) -> bool:
+    """
+    НЮАНС №2: Проверяет, находится ли слово в скобках вида:
+    'Посудомоечная машина (Dishwasher)' или [Built-in].
+    """
     before = text[:start]
-    open_index = before.rfind("(")
-    close_index = before.rfind(")")
-    if open_index <= close_index:
+    open_round = before.rfind("(")
+    close_round = before.rfind(")")
+    open_square = before.rfind("[")
+    close_square = before.rfind("]")
+
+    # Определяем тип скобки
+    open_idx = -1
+    close_char = ""
+    if open_round > close_round:
+        open_idx = open_round
+        close_char = ")"
+    elif open_square > close_square:
+        open_idx = open_square
+        close_char = "]"
+
+    if open_idx == -1:
         return False
-    if text.find(")", end) < 0:
+
+    after = text[end:]
+    close_idx_rel = after.find(close_char)
+    if close_idx_rel < 0:
         return False
-    before_parenthesis = before[:open_index]
-    return bool(re.search(r"[А-Яа-яЁё]", before_parenthesis[-120:]))
+
+    close_idx = end + close_idx_rel
+
+    # Скобки не должны разрываться абзацами или быть длиннее 100 символов
+    inside_content = text[open_idx:close_idx + 1]
+    if "\n" in inside_content or len(inside_content) > 100:
+        return False
+
+    # До открывающей скобки должен присутствовать русский текст
+    before_bracket = before[:open_idx]
+    return bool(re.search(r"[А-Яа-яЁё]", before_bracket[-80:]))
 
 
 def _is_technical_identifier(candidate: str, text: str, start: int, end: int) -> bool:
+    """НЮАНС №1 и характеристики: отсекает файлы, габариты, артикулы и единицы измерения."""
     lower = candidate.casefold()
     if len(candidate) == 1:
         return True
     if any(marker in lower for marker in ("://", "@")):
         return True
-    if start and text[start - 1] == "/":
+    if start and text[start - 1] in {"/", "\\"}:
         return True
-    if end < len(text) and text[end] == "/":
+    if end < len(text) and text[end] in {"/", "\\"}:
         return True
-    if "." in candidate and candidate.rsplit(".", 1)[-1].casefold() in DOMAIN_SUFFIXES | FILE_SUFFIXES:
+
+    # Расширения файлов (image.png, clip.mp4)
+    if "." in candidate and candidate.rsplit(".", 1)[-1].casefold() in (DOMAIN_SUFFIXES | FILE_SUFFIXES):
         return True
+
+    # Единицы измерений (напр. 220v, 1400rpm, 50hz)
+    if TECHNICAL_UNITS_RE.match(candidate):
+        return True
+
+    # Габариты (напр. 60x60x85)
+    if re.fullmatch(r"\d+x\d+(?:x\d+)?", lower):
+        return True
+
+    # Если спереди или сзади вплотную примыкает цифра
     if (start and text[start - 1].isdigit()) or (end < len(text) and text[end].isdigit()):
         return True
-    if any(char.isdigit() for char in candidate):
+
+    # Смесь букв и цифр (артикулы моделей: SPV4HMX14Q, BWD421PRO)
+    if any(char.isdigit() for char in candidate) and any(char.isalpha() for char in candidate):
         return True
+
+    # Аббревиатуры из заглавных букв (LED, OLED, NFC)
     if re.fullmatch(r"[A-Z]{2,}(?:[-/][A-Z0-9]+)*", candidate):
         return True
+
     if lower in DOMAIN_SUFFIXES:
         return True
+
     return False
 
 
@@ -122,7 +176,6 @@ def find_english_issues(
     custom_exceptions: str | Iterable[str] | None = None,
     limit: int = 200,
 ) -> list[dict[str, str]]:
-    """Find English words or phrases that are not in the technical whitelist."""
     if not text:
         return []
 
@@ -139,6 +192,7 @@ def find_english_issues(
             continue
         if candidate.casefold() in allowlist:
             continue
+
         candidate_for_tokens = candidate
         for allowed_phrase in sorted(
             (item for item in allowlist if " " in item),
@@ -151,15 +205,15 @@ def find_english_issues(
                 candidate_for_tokens,
                 flags=re.IGNORECASE,
             )
+
         unknown = [
             token for token in TOKEN_RE.findall(candidate_for_tokens)
-            if token.casefold() not in allowlist
+            if token.casefold() not in allowlist and not TECHNICAL_UNITS_RE.match(token)
         ]
+
         if not unknown or _is_inside_translation_parentheses(text, match.start(), match.end()):
             continue
 
-        # Keep phrases such as "Buy now" together, but remove a whitelisted brand
-        # from a mixed match such as "Samsung collection".
         term = " ".join(unknown)
         key = (term.casefold(), source, _context(text, match.start(), match.end()).casefold())
         if key in seen:
@@ -182,10 +236,15 @@ def check_page(
     custom_exceptions: str | Iterable[str] | None = None,
     automatic_whitelist: str | Iterable[str] | None = None,
 ) -> list[dict[str, str]]:
-    """Analyze visible text, attributes, title and description from one crawl result."""
     exceptions = parse_exceptions(custom_exceptions) | parse_exceptions(automatic_whitelist)
     issues: list[dict[str, str]] = []
+
+    # Не ищем ошибки на страницах, вернувших HTTP-ошибку
+    if page.get("error"):
+        return []
+
     issues.extend(find_english_issues(page.get("text", ""), "Видимый текст", exceptions))
+
     attributes = re.sub(
         r"(?:^|\n)(?:alt|title|placeholder|aria-label):\s*",
         "\n",
