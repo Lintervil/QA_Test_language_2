@@ -1,4 +1,4 @@
-"""Playwright crawler used by the Streamlit translation checker."""
+"""Playwright crawler with deep category-to-product traversal and balanced quotas."""
 
 from __future__ import annotations
 
@@ -20,13 +20,11 @@ except ModuleNotFoundError as error:
     PlaywrightTimeoutError = TimeoutError
     PLAYWRIGHT_IMPORT_ERROR = str(error)
 
-
 NAVIGATION_TIMEOUT = 35_000
 DEFAULT_HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
 }
 
-# Игнорируемые расширения статичных файлов
 MEDIA_EXTENSIONS_PATTERN = re.compile(
     r"\.(?:pdf|jpg|jpeg|png|gif|svg|webp|avif|mp4|webm|avi|mov|mp3|zip|rar|tar|gz|css|js|woff|woff2|ttf|eot)(?:$|\?)",
     re.IGNORECASE,
@@ -42,10 +40,10 @@ def normalize_url(value: str) -> str:
     value, _ = urldefrag(value)
     parsed = urlsplit(value)
 
-    # Фильтруем UTM-метки, счетчики и параметры сортировки каталога для избежания циклов
+    # Исключаем параметры пагинации, сортировки и аналитики во избежание зацикливания
     ignored_params = (
         "utm_", "fbclid", "gclid", "yclid", "_openstat",
-        "sort", "order", "orderby", "dir", "limit", "view"
+        "sort", "order", "orderby", "dir", "limit", "view", "page", "p"
     )
     query = [
         (key, item)
@@ -65,7 +63,7 @@ def _same_domain(first: str, second: str) -> bool:
 def _looks_like_product_url(url: str) -> bool:
     path = (urlparse(url).path or "").casefold()
     return (
-        path.endswith(('.html', '.htm'))
+        path.endswith((".html", ".htm"))
         or any(marker in path for marker in ("/product/", "/products/", "/item/", "/goods/", "/p/"))
     )
 
@@ -77,24 +75,47 @@ def _looks_like_catalog_url(url: str) -> bool:
     return any(marker in path.split("/") for marker in ("catalog", "catalogue", "category", "categories", "shop"))
 
 
+def classify_url(url: str) -> str:
+    """Определяет роль страницы: главная, товар, каталог, статьи или инфо."""
+    path = (urlparse(url).path or "").strip("/").casefold()
+    if not path:
+        return "home"
+    if _looks_like_product_url(url):
+        return "product"
+
+    # Новости, промо-акции и статьи
+    article_markers = ("news", "articles", "article", "blog", "stati", "novosti", "obzory", "promo", "actions", "action", "sale", "skidki", "akcii")
+    if any(marker in path.split("/") for marker in article_markers):
+        return "article"
+
+    # Служебные инфо-разделы
+    info_markers = ("about", "contacts", "delivery", "payment", "warranty", "service", "dostavka", "oplata", "garantiya", "servis", "policy", "privacy")
+    if any(marker in path.split("/") for marker in info_markers):
+        return "info"
+
+    if _looks_like_catalog_url(url) or len(path.split("/")) <= 3:
+        return "catalog"
+
+    return "info"
+
+
 NAV_LINK_SELECTOR = (
     "header a[href], nav a[href], footer a[href], [role='navigation'] a[href], "
-    "[class*='header'] a[href], [class*='footer'] a[href]"
+    "[class*='header'] a[href], [class*='footer'] a[href], [class*='menu'] a[href]"
 )
 
 
-def _internal_links(page, base_url: str, selector: str = "a[href]") -> list[str]:
-    links = page.eval_on_selector_all(
-        selector,
-        """
-        elements => elements.filter(element => {
-          const style = getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' &&
-            rect.width > 0 && rect.height > 0;
-        }).map(element => element.href)
-        """,
-    )
+def _internal_links(page, base_url: str, selector: str = "a[href]", allow_hidden: bool = False) -> list[str]:
+    # allow_hidden=True позволяет доставать подкатегории из выпадающих шторок меню
+    js_code = f"""
+    elements => elements.filter(element => {{
+        if ({str(allow_hidden).lower()}) return true;
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    }}).map(element => element.href)
+    """
+    links = page.eval_on_selector_all(selector, js_code)
     result: list[str] = []
     seen: set[str] = set()
     for raw_url in links:
@@ -123,19 +144,17 @@ def _expand_dynamic_content(page) -> None:
         ".swiper-button-next",
         ".slick-next",
         ".owl-next",
-        "button[aria-label*='next' i]",
-        "button[title*='next' i]",
     ]
     for selector in selectors:
         try:
             locator = page.locator(selector)
-            count = min(locator.count(), 40)
+            count = min(locator.count(), 30)
             for index in range(count):
                 try:
                     item = locator.nth(index)
-                    if item.is_visible(timeout=200):
-                        item.click(timeout=600, force=True)
-                        page.wait_for_timeout(80)
+                    if item.is_visible(timeout=150):
+                        item.click(timeout=500, force=True)
+                        page.wait_for_timeout(60)
                 except (PlaywrightError, PlaywrightTimeoutError):
                     continue
         except (PlaywrightError, PlaywrightTimeoutError):
@@ -144,10 +163,10 @@ def _expand_dynamic_content(page) -> None:
 
 def _scroll_to_end(page) -> None:
     last_height = 0
-    for _ in range(8):
+    for _ in range(6):
         height = page.evaluate("document.documentElement.scrollHeight")
         page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(250)
         new_height = page.evaluate("document.documentElement.scrollHeight")
         if new_height == last_height or new_height == height:
             break
@@ -157,33 +176,25 @@ def _scroll_to_end(page) -> None:
 
 def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
     response = page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT)
-    page.wait_for_timeout(600)
+    page.wait_for_timeout(500)
 
-    # НЮАНС №3: Фильтрация битых страниц (404, 500 и т.д.)
+    # Игнорируем страницы 404, 500 и прочие системные сбои
     if response and response.status >= 400:
         return {
-            "url": url,
-            "depth": depth,
-            "title": "",
-            "description": "",
-            "text": "",
-            "attributes": "",
-            "site_terms": [],
-            "model_terms": [],
-            "issues": [],
-            "error": f"HTTP {response.status} ({response.status_text})",
-            "links": [],
-            "nav_links": [],
+            "url": url, "depth": depth, "title": "", "description": "",
+            "text": "", "attributes": "", "site_terms": [], "model_terms": [],
+            "issues": [], "error": f"HTTP {response.status} ({response.status_text})",
+            "links": [], "nav_links": [],
         }
 
     if expand_dynamic:
         _expand_dynamic_content(page)
     _scroll_to_end(page)
 
-    # НЮАНС №1: Удаляем мусорные теги из DOM перед чтением текста
+    # Очищаем DOM от скриптов, стилей и SVG перед извлечением текста
     page.evaluate("""() => {
-        const removeSelectors = ['script', 'style', 'noscript', 'svg', 'template', 'iframe'];
-        document.querySelectorAll(removeSelectors.join(',')).forEach(el => el.remove());
+        const remove = ['script', 'style', 'noscript', 'svg', 'iframe', 'template'];
+        document.querySelectorAll(remove.join(',')).forEach(el => el.remove());
     }""")
 
     text = page.locator("body").inner_text(timeout=5_000)
@@ -221,45 +232,29 @@ def _collect_page(page, url: str, depth: int, expand_dynamic: bool) -> dict:
     description = page.locator("meta[name='description']").get_attribute("content") or ""
 
     return {
-        "url": url,
-        "depth": depth,
-        "title": title,
-        "description": description,
-        "text": text,
-        "attributes": attributes,
-        "site_terms": site_terms or [],
-        "model_terms": model_terms or [],
-        "issues": [],
-        "error": "",
+        "url": url, "depth": depth, "title": title, "description": description,
+        "text": text, "attributes": attributes, "site_terms": site_terms or [],
+        "model_terms": model_terms or [], "issues": [], "error": "",
         "links": _internal_links(page, url),
-        "nav_links": _internal_links(page, url, NAV_LINK_SELECTOR),
+        "nav_links": _internal_links(page, url, NAV_LINK_SELECTOR, allow_hidden=True),
     }
 
 
 def _install_browser_if_needed() -> None:
     if sync_playwright is None:
-        raise RuntimeError(
-            "Не установлен Playwright. Добавьте requirements.txt в корень GitHub-репозитория "
-            "рядом с app.py и перезапустите приложение."
-        ) from ModuleNotFoundError(PLAYWRIGHT_IMPORT_ERROR)
+        raise RuntimeError("Не установлен Playwright. Добавьте playwright в requirements.txt.") from ModuleNotFoundError(PLAYWRIGHT_IMPORT_ERROR)
     with sync_playwright() as playwright:
         executable = playwright.chromium.executable_path
     if os.path.exists(executable):
         return
-    subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
 def crawl_site(
     start_url: str,
-    max_depth: int | None = 0,
-    max_pages: int | None = 20,
-    product_sample: int = 3,
+    max_depth: int | None = 3,
+    max_pages: int | None = 100,
+    product_sample: int = 2,
     expand_dynamic: bool = True,
     smart_mode: bool = True,
     progress=None,
@@ -271,29 +266,25 @@ def crawl_site(
     if urlparse(start_url).scheme not in {"http", "https"}:
         raise ValueError("Ссылка должна начинаться с http:// или https://")
 
-    if max_depth is not None:
-        max_depth = max(0, min(int(max_depth), 3))
-    if max_pages is not None:
-        max_pages = max(1, min(int(max_pages), 500))
-    product_sample = max(1, min(int(product_sample), 10))
-    if _looks_like_product_url(start_url):
-        start_kind = "product"
-    else:
-        start_kind = "catalog" if _looks_like_catalog_url(start_url) else "home"
-    if not smart_mode:
-        start_kind = "generic"
+    total_limit = max_pages or 100
+    product_sample = max(1, min(int(product_sample), 5))
 
-    queue = deque([(start_url, 0, start_kind)])
-    queued = {start_url}
+    # Сбалансированные квоты для распределения типов страниц
+    LIMIT_CATALOG = int(total_limit * 0.35)   # До 35% категорий и подкатегорий
+    LIMIT_PRODUCT = int(total_limit * 0.45)   # До 45% товаров
+    LIMIT_CONTENT = total_limit - (LIMIT_CATALOG + LIMIT_PRODUCT)  # Остаток под статьи, акции и инфо
+
+    counts = {"catalog": 0, "product": 0, "content": 0}
+
+    queue = deque([(start_url, 0, "home")])
+    visited: set[str] = set()
+    enqueued: set[str] = {start_url}
     results: list[dict] = []
     limit_reached = False
 
     _install_browser_if_needed()
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=["--disable-dev-shm-usage", "--no-sandbox"],
-        )
+        browser = playwright.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--no-sandbox"])
         context = browser.new_context(
             viewport={"width": 1440, "height": 900},
             locale="ru-RU",
@@ -301,101 +292,90 @@ def crawl_site(
             ignore_https_errors=True,
         )
         page = context.new_page()
-        page.set_default_timeout(5_000)
         page.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
 
-        def enqueue(link: str, depth: int, kind: str) -> None:
-            nonlocal limit_reached
-            if (max_depth is not None and depth > max_depth) or link in queued:
-                return
-            if max_pages is not None and len(queued) >= max_pages:
-                limit_reached = True
-                return
-            queued.add(link)
-            queue.append((link, depth, kind))
-
         try:
-            while queue and (max_pages is None or len(results) < max_pages):
+            while queue and len(results) < total_limit:
                 url, depth, kind = queue.popleft()
+                if url in visited:
+                    continue
+                visited.add(url)
+
                 if status:
-                    total_label = "без лимита" if max_pages is None else str(max_pages)
-                    status(f"Проверяется страница {len(results) + 1} из {total_label}: {url}")
-                if progress and max_pages is not None:
-                    progress(len(results) / max_pages)
+                    status(f"Проверяется [{kind}]: {url} ({len(results) + 1}/{total_limit})")
+                if progress:
+                    progress(len(results) / total_limit)
 
                 try:
                     result = _collect_page(page, url, depth, expand_dynamic)
                 except Exception as error:
                     result = {
-                        "url": url,
-                        "depth": depth,
-                        "title": "",
-                        "description": "",
-                        "text": "",
-                        "attributes": "",
-                        "site_terms": [],
-                        "model_terms": [],
-                        "issues": [],
-                        "error": str(error),
-                        "links": [],
-                        "nav_links": [],
+                        "url": url, "depth": depth, "title": "", "description": "",
+                        "text": "", "attributes": "", "site_terms": [], "model_terms": [],
+                        "issues": [], "error": str(error), "links": [], "nav_links": [],
                     }
 
                 results.append(result)
-
-                # Не ищем дочерние ссылки на страницах с ошибками
                 if result.get("error"):
                     continue
 
-                if smart_mode:
-                    next_depth = depth + 1
-                    if kind == "home":
-                        for link in result.get("nav_links", []):
-                            if _looks_like_catalog_url(link):
-                                enqueue(link, next_depth, "catalog")
-                            elif not _looks_like_product_url(link):
-                                enqueue(link, next_depth, "nav")
-                        for link in result.get("links", []):
-                            if _looks_like_catalog_url(link):
-                                enqueue(link, next_depth, "catalog")
-                    elif kind == "nav":
-                        for link in result.get("nav_links", []):
-                            if _looks_like_catalog_url(link):
-                                enqueue(link, next_depth, "catalog")
-                    elif kind == "catalog":
-                        product_links_seen = 0
-                        for link in result.get("links", []):
-                            if _looks_like_catalog_url(link):
-                                enqueue(link, next_depth, "catalog")
-                            elif _looks_like_product_url(link):
-                                if product_links_seen >= product_sample:
-                                    continue
-                                product_links_seen += 1
-                                enqueue(link, next_depth, "product")
-                else:
-                    product_links_seen = 0
-                    current_is_product = _looks_like_product_url(url)
-                    for link in result.get("links", []):
-                        link_is_product = _looks_like_product_url(link)
-                        if link_is_product and current_is_product:
-                            continue
-                        if link_is_product:
-                            if product_links_seen >= product_sample:
-                                continue
-                            product_links_seen += 1
-                        enqueue(link, depth + 1, "generic")
+                links = result.get("links", [])
+                nav_links = result.get("nav_links", [])
 
-                if progress and max_pages is not None:
-                    progress(len(results) / max_pages)
+                if kind == "home":
+                    # С главной сразу забираем инфо-разделы и акции из навигации
+                    for link in nav_links:
+                        c_type = classify_url(link)
+                        if c_type in {"info", "article"} and counts["content"] < LIMIT_CONTENT and link not in enqueued:
+                            enqueued.add(link)
+                            counts["content"] += 1
+                            queue.append((link, depth + 1, c_type))
+
+                    # Забираем основные категории каталога
+                    for link in nav_links + links:
+                        if classify_url(link) == "catalog" and counts["catalog"] < LIMIT_CATALOG and link not in enqueued:
+                            enqueued.add(link)
+                            counts["catalog"] += 1
+                            queue.append((link, depth + 1, "catalog"))
+
+                elif kind == "catalog":
+                    # 1. Если внутри раздела есть подкатегории (Встраиваемые, Компактные и т.д.)
+                    subcats = [l for l in links if classify_url(l) == "catalog" and l not in enqueued]
+                    for sub in subcats[:3]:  # Берем до 3 подкатегорий
+                        if counts["catalog"] < LIMIT_CATALOG:
+                            enqueued.add(sub)
+                            counts["catalog"] += 1
+                            queue.appendleft((sub, depth + 1, "catalog"))
+
+                    # 2. Берем товары из этой категории и сразу ставим вперед на проверку
+                    prods = [l for l in links if classify_url(l) == "product" and l not in enqueued]
+                    for prod in prods[:product_sample]:
+                        if counts["product"] < LIMIT_PRODUCT:
+                            enqueued.add(prod)
+                            counts["product"] += 1
+                            queue.appendleft((prod, depth + 1, "product"))
+
+                elif kind in {"info", "article"}:
+                    # Из общих разделов статей берем отдельные статьи/акции
+                    for link in links:
+                        c_type = classify_url(link)
+                        if c_type in {"info", "article"} and counts["content"] < LIMIT_CONTENT and link not in enqueued:
+                            enqueued.add(link)
+                            counts["content"] += 1
+                            queue.append((link, depth + 1, c_type))
+
+                if progress:
+                    progress(len(results) / total_limit)
         finally:
             context.close()
             browser.close()
 
+    if len(results) >= total_limit:
+        limit_reached = True
+
     if results:
         results[0]["_limit_reached"] = limit_reached
+
     if status:
-        if limit_reached or (max_pages is not None and len(results) >= max_pages and queue):
-            status(f"Проверка остановлена на лимите: {len(results)} страниц")
-        else:
-            status(f"Проверка завершена: {len(results)} страниц")
+        status(f"Проверка завершена: {len(results)} страниц")
     return results
