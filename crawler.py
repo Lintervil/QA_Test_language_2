@@ -1,4 +1,4 @@
-"""Playwright crawler with blacklist filtering, exact product matching, and balanced traversal."""
+"""Playwright crawler with multi-network catalog support, blacklist filtering, and product prioritization."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ MEDIA_EXTENSIONS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Черный список URL: отсекает 50%+ мусорных страниц шаблона Kvalitet Trade
+# Черный список URL: полностью отсекает мусорные разделы шаблона сети
 USELESS_URL_MARKERS = (
     "/glossary",
     "param=",
@@ -38,10 +38,17 @@ USELESS_URL_MARKERS = (
     "/recommend/",
     "/personal-data",
     "/favorites",
+    "/compare",
+    "/cart",
+    "/basket",
     "/tags",
     "/map",
     "/ratings/",
     "/video",
+    "/technical-documentation",
+    "/showroom",
+    "/designers",
+    "/sales",
     "mailto:",
     "tel:",
     "javascript:",
@@ -50,13 +57,13 @@ USELESS_URL_MARKERS = (
 
 
 def is_useless_url(url: str) -> bool:
-    """Проверяет, относится ли ссылка к бесполезным техническим/сервисным разделам."""
+    """Проверяет, относится ли ссылка к бесполезным разделам."""
     lower = url.casefold()
     return any(marker in lower for marker in USELESS_URL_MARKERS)
 
 
 def normalize_url(value: str) -> str:
-    """Очищает URL от UTM-меток, пагинации и исключает мусорные протоколы."""
+    """Очищает URL от UTM-меток, пагинации и исключает паразитные протоколы."""
     value = value.strip()
     if not value or is_useless_url(value):
         return ""
@@ -67,7 +74,7 @@ def normalize_url(value: str) -> str:
     value, _ = urldefrag(value)
     parsed = urlsplit(value)
 
-    # Исключаем параметры сортировки и пагинации во избежание бесконечных циклов
+    # Исключаем параметры фильтрации и пагинации
     ignored_params = (
         "utm_", "fbclid", "gclid", "yclid", "_openstat",
         "sort", "order", "orderby", "dir", "limit", "view", "page", "p"
@@ -88,33 +95,38 @@ def _same_domain(first: str, second: str) -> bool:
 
 
 def _looks_like_product_url(url: str) -> bool:
-    """Определяет карточку товара (включая структуру /catalog/kategoriya/nazvanie-modeli)."""
+    """Определяет карточку товара для /catalog/, /market/ и прямых ссылок."""
     path = (urlparse(url).path or "").strip("/").casefold()
-    if not path:
+    if not path or is_useless_url(url):
         return False
 
-    if path.endswith((".html", ".htm")) or any(marker in path for marker in ("/product/", "/products/", "/item/", "/goods/", "/p/")):
+    if path.endswith((".html", ".htm")) or any(
+        marker in path for marker in ("/product/", "/products/", "/item/", "/goods/", "/p/")
+    ):
         return True
 
-    # Структура каталога сайтов этой сети: catalog / категория / конкретная-модель
+    # Структура каталога: catalog|market / категория / конкретная-модель
     parts = [p for p in path.split("/") if p]
-    if len(parts) >= 3 and parts[0] == "catalog":
-        # Исключаем системные служебные фильтры и группы
-        if parts[1] not in {"group", "type-hit", "type-nov", "complects"} and parts[2] not in {"recommend", "filter"}:
+    if len(parts) >= 3 and parts[0] in {"catalog", "market"}:
+        if parts[1] not in {"group", "type-hit", "type-nov", "complects", "calc"} and parts[2] not in {"recommend", "filter"}:
             return True
 
     return False
 
 
 def _looks_like_catalog_url(url: str) -> bool:
-    if _looks_like_product_url(url):
+    """Определяет страницу раздела каталога."""
+    if _looks_like_product_url(url) or is_useless_url(url):
         return False
     path = (urlparse(url).path or "").casefold()
-    return any(marker in path.split("/") for marker in ("catalog", "catalogue", "category", "categories", "shop"))
+    parts = [p for p in path.strip("/").split("/") if p]
+    if parts and parts[0] in {"catalog", "catalogue", "category", "categories", "shop", "market"}:
+        return True
+    return False
 
 
 def classify_url(url: str) -> str:
-    """Определяет назначение страницы для квотирования лимитов."""
+    """Определяет назначение страницы для сбалансированного обхода."""
     if is_useless_url(url):
         return "ignored"
 
@@ -124,7 +136,7 @@ def classify_url(url: str) -> str:
     if _looks_like_product_url(url):
         return "product"
 
-    article_markers = ("news", "articles", "article", "blog", "stati", "novosti", "obzory", "promo", "actions", "action", "sale", "skidki", "akcii")
+    article_markers = ("news", "articles", "article", "blog", "stati", "novosti", "obzory", "promo", "actions", "action", "skidki", "akcii")
     if any(marker in path.split("/") for marker in article_markers):
         return "article"
 
@@ -132,7 +144,7 @@ def classify_url(url: str) -> str:
     if any(marker in path.split("/") for marker in info_markers):
         return "info"
 
-    if _looks_like_catalog_url(url) or len(path.split("/")) <= 3:
+    if _looks_like_catalog_url(url) or len(path.split("/")) <= 2:
         return "catalog"
 
     return "info"
@@ -312,10 +324,10 @@ def crawl_site(
     total_limit = max_pages or 100
     product_sample = max(1, min(int(product_sample), 5))
 
-    # Сбалансированное распределение квот
-    LIMIT_CATALOG = int(total_limit * 0.35)   # До 35% категорий и подкатегорий
+    # Сбалансированные квоты
+    LIMIT_CATALOG = int(total_limit * 0.35)   # До 35% категорий
     LIMIT_PRODUCT = int(total_limit * 0.45)   # До 45% товаров
-    LIMIT_CONTENT = total_limit - (LIMIT_CATALOG + LIMIT_PRODUCT)  # Остаток под статьи и инфо-страницы
+    LIMIT_CONTENT = total_limit - (LIMIT_CATALOG + LIMIT_PRODUCT)
 
     counts = {"catalog": 0, "product": 0, "content": 0}
 
@@ -343,7 +355,7 @@ def crawl_site(
             ignore_https_errors=True,
         )
 
-        # Отсекаем загрузку тяжелых медиафайлов для экономии памяти сервера
+        # Отсекаем загрузку тяжелых медиафайлов
         context.route(
             "**/*.{png,jpg,jpeg,webp,gif,svg,mp4,webm,avi,woff,woff2,ttf,eot}",
             lambda route: route.abort(),
@@ -381,7 +393,7 @@ def crawl_site(
                 nav_links = result.get("nav_links", [])
 
                 if kind == "home":
-                    # С главной берем служебные разделы и новости
+                    # С главной берем служебные разделы и статьи
                     for link in nav_links:
                         c_type = classify_url(link)
                         if c_type in {"info", "article"} and counts["content"] < LIMIT_CONTENT and link not in enqueued:
@@ -389,7 +401,7 @@ def crawl_site(
                             counts["content"] += 1
                             queue.append((link, depth + 1, c_type))
 
-                    # Берем ключевые каталоги
+                    # Берем основные категории каталога
                     for link in nav_links + links:
                         if classify_url(link) == "catalog" and counts["catalog"] < LIMIT_CATALOG and link not in enqueued:
                             enqueued.add(link)
@@ -397,7 +409,7 @@ def crawl_site(
                             queue.append((link, depth + 1, "catalog"))
 
                 elif kind == "catalog":
-                    # 1. Если есть подкатегории (например: Встраиваемые, С паром и т.д.)
+                    # 1. Подкатегории
                     subcats = [l for l in links if classify_url(l) == "catalog" and l not in enqueued]
                     for sub in subcats[:3]:
                         if counts["catalog"] < LIMIT_CATALOG:
@@ -405,7 +417,7 @@ def crawl_site(
                             counts["catalog"] += 1
                             queue.appendleft((sub, depth + 1, "catalog"))
 
-                    # 2. Немедленно ставим 1-2 товара из текущей категории вперед в очередь
+                    # 2. Немедленно ставим 1-2 товара из этой категории в начало очереди
                     prods = [l for l in links if classify_url(l) == "product" and l not in enqueued]
                     for prod in prods[:product_sample]:
                         if counts["product"] < LIMIT_PRODUCT:
