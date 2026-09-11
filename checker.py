@@ -20,10 +20,10 @@ FILE_SUFFIXES = {
 
 GENERIC_SITE_TERMS = {
     "www", "shop", "store", "online", "official", "site", "home", "main",
-    "catalog", "ru", "com", "net", "org", "info",
+    "catalog", "market", "ru", "com", "net", "org", "info",
 }
 
-# Отсечение единиц измерения бытовой техники (220V, 1400rpm, 50Hz, 10kg и др.)
+# Отсечение единиц измерения бытовой техники
 TECHNICAL_UNITS_RE = re.compile(
     r"^\d+(?:[.,]\d+)?\s*(?:v|w|kw|kwh|a|ma|hz|khz|mhz|ghz|db|rpm|kg|g|mg|l|ml|mm|cm|m|km|bar|pa|kpa|btu|din|ip\d{2})$",
     re.IGNORECASE
@@ -88,7 +88,7 @@ def is_technical_token(word: str) -> bool:
     if TECHNICAL_UNITS_RE.match(word):
         return True
 
-    # Артикулы моделей со смесью букв и цифр (BOP798S54X, SPV4HMX14Q, DNS92)
+    # Артикулы моделей со смесью букв и цифр (BOP798S54X, SPV4HMX14Q, DNS92, WEI865)
     has_digit = any(c.isdigit() for c in word)
     has_alpha = any(c.isalpha() for c in word)
     if has_digit and has_alpha:
