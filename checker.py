@@ -23,17 +23,17 @@ GENERIC_SITE_TERMS = {
     "catalog", "market", "ru", "com", "net", "org", "info",
 }
 
-# Отсечение единиц измерения бытовой техники
 TECHNICAL_UNITS_RE = re.compile(
     r"^\d+(?:[.,]\d+)?\s*(?:v|w|kw|kwh|a|ma|hz|khz|mhz|ghz|db|rpm|kg|g|mg|l|ml|mm|cm|m|km|bar|pa|kpa|btu|din|ip\d{2})$",
     re.IGNORECASE
 )
 
-# Вырезание формата «Русское слово (English)» или [English]
 BILINGUAL_RE = re.compile(
     r"([А-Яа-яЁё0-9\s\-–—/]{1,80})\s*[\(\[][A-Za-z0-9\s\-–—,./+#'\"]{1,100}[\)\]]"
 )
 
+# Вырезание email (shop@miele-store.ru, business@kvalitet.company)
+EMAIL_RE = re.compile(r"[\w\.-]+@[\w\.-]+\.\w+")
 URL_RE = re.compile(r"https?://\S+|www\.\S+")
 FILES_RE = re.compile(
     r"\b[\w\-.]+\.(?:jpg|jpeg|png|gif|svg|webp|avif|mp4|webm|avi|mov|mp3|pdf|zip|rar|css|js|json|xml)\b",
@@ -52,7 +52,6 @@ def parse_exceptions(value: str | Iterable[str] | None) -> set[str]:
 
 
 def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
-    """Быстрый сбор названия бренда из домена и кодов моделей из H1/title."""
     result = set()
     host = urlparse(start_url).hostname or ""
     for part in host.split("."):
@@ -72,7 +71,6 @@ def automatic_exceptions(start_url: str, pages: list[dict]) -> set[str]:
 
 
 def is_technical_token(word: str) -> bool:
-    """Проверка на габариты, артикулы и системные токены."""
     if len(word) <= 1:
         return True
 
@@ -80,21 +78,17 @@ def is_technical_token(word: str) -> bool:
     if lower in DOMAIN_SUFFIXES or lower in FILE_SUFFIXES:
         return True
 
-    # Габариты (например, 60x60, 595x595x564)
     if re.fullmatch(r"\d+x\d+(?:x\d+)?", lower):
         return True
 
-    # Единицы измерений техники
     if TECHNICAL_UNITS_RE.match(word):
         return True
 
-    # Артикулы моделей со смесью букв и цифр (BOP798S54X, SPV4HMX14Q, DNS92, WEI865)
     has_digit = any(c.isdigit() for c in word)
     has_alpha = any(c.isalpha() for c in word)
     if has_digit and has_alpha:
         return True
 
-    # Аббревиатуры из заглавных букв (LED, OLED, NFC, USB)
     if re.fullmatch(r"[A-Z0-9]{2,}(?:[-/][A-Z0-9]+)*", word):
         return True
 
@@ -102,8 +96,8 @@ def is_technical_token(word: str) -> bool:
 
 
 def clean_text_fast(text: str, multiword_exceptions: list[str]) -> str:
-    """Очистка текста от формата перевода, ссылок и медиа за один проход."""
     cleaned = BILINGUAL_RE.sub(r"\1 ()", text)
+    cleaned = EMAIL_RE.sub(" ", cleaned)
     cleaned = URL_RE.sub(" ", cleaned)
     cleaned = FILES_RE.sub(" ", cleaned)
 
@@ -195,14 +189,11 @@ def check_page(
 
     issues: list[dict[str, str]] = []
 
-    # 1. Текст страницы
     issues.extend(find_english_issues(page.get("text", ""), "Видимый текст", allowlist, multiword_exceptions))
 
-    # 2. Атрибуты интерфейса (alt, title, placeholder)
     attrs = re.sub(r"(?:^|\n)(?:alt|title|placeholder|aria-label):\s*", "\n", page.get("attributes", ""), flags=re.IGNORECASE)
     issues.extend(find_english_issues(attrs, "Атрибуты интерфейса", allowlist, multiword_exceptions))
 
-    # 3. Мета-теги страницы
     issues.extend(find_english_issues(page.get("title", ""), "HTML title", allowlist, multiword_exceptions))
     issues.extend(find_english_issues(page.get("description", ""), "Meta description", allowlist, multiword_exceptions))
 
